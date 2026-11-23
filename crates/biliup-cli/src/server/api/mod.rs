@@ -41,6 +41,8 @@ pub mod markers;
 pub mod mosaic_frame;
 /// 非超管的配置与主播数据脱敏
 pub mod redact;
+/// 转播底座的健康快照与生命周期
+pub mod relay;
 /// 录后画面、弹幕合成与遮挡图片资产
 pub mod renders;
 pub mod session_groups;

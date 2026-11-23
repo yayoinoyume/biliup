@@ -107,6 +107,7 @@ pub async fn serve_on(
     fleet: FleetOptions,
     shutdown: Option<BoxFuture<'static, ()>>,
 ) -> AppResult<()> {
+    biliup_relay::install_crypto_provider();
     let addr = listener.local_addr().change_context(AppError::Unknown)?;
     validate_server_exposure(addr, auth)?;
     server::fleet::reject_config_file(config_path.as_deref())?;
@@ -187,6 +188,24 @@ pub async fn serve_on(
         log_handle,
     )
     .await;
+
+    let relay_ffmpeg_path = config
+        .read()
+        .unwrap()
+        .ffmpeg_path
+        .clone()
+        .map(PathBuf::from);
+    if let Err(error) = service_register
+        .relay
+        .start(biliup_relay::RelayInitConfig {
+            data_dir: PathBuf::from("data/relay"),
+            key_file: None,
+            ffmpeg_path: relay_ffmpeg_path,
+        })
+        .await
+    {
+        tracing::warn!(%error, "转播底座启动失败，健康快照会停在 disabled");
+    }
 
     if let Some(path) = config_path.as_deref() {
         import_config_streamers(path, &service_register).await?;

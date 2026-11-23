@@ -214,6 +214,7 @@ mod tests {
         let services = ServiceRegister {
             upload_observations: managers.upload_observations(),
             room_cover_refresh: None,
+            relay: Arc::new(biliup_relay::RelayService::new()),
             renders: Arc::new(crate::server::workbench::renders::RenderJobs::new(
                 pool.clone(),
                 dir.path().join("renders"),

@@ -23,6 +23,10 @@ export type Permission =
   | 'user.manage'
   | 'clip.edit'
   | 'node.manage'
+  | 'relay.view'
+  | 'relay.control'
+  | 'relay.config'
+  | 'relay.cluster'
 
 /** 同上，与后端 `Role` 对应 */
 export type Role = 'admin' | 'operator' | 'viewer'
@@ -50,6 +54,10 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   'user.manage': '管理用户',
   'clip.edit': '管理标记、场次和切片',
   'node.manage': '管理节点',
+  'relay.view': '查看转播状态',
+  'relay.control': '启停转播',
+  'relay.config': '修改转播配置',
+  'relay.cluster': '管理转播集群',
 }
 
 export interface Me {

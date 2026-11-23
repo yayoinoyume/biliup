@@ -16,6 +16,7 @@ biliup = { path = "../biliup", features = ["cli"] }
 danmaku-client = { package = "danmaku", path = "../danmaku" }
 # 弹幕 XML -> ASS：原生 Rust 排版（crates/danmaku-factory），直接链接进本程序，在本进程内转换
 danmaku-factory = { path = "../danmaku-factory" }
+biliup-relay = { path = "../biliup-relay" }
 
 # mesio（rust-srec）：进程内 FLV/HLS 下载 + 修复管线，见 server/core/downloader/mesio.rs
 mesio-engine = { git = "https://github.com/hua0512/rust-srec", rev = "dcdb80ee607ff6a991e5ddd86a0084a01bd945ac" }

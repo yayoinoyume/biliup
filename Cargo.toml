@@ -5,6 +5,7 @@ members = [
     "crates/stream-gears",
     "crates/danmaku",
     "crates/danmaku-factory",
+    "crates/biliup-relay",
 ]
 resolver = "3"
 

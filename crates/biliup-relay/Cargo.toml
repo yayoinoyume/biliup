@@ -1,0 +1,17 @@
+[package]
+name = "biliup-relay"
+version.workspace = true
+edition = "2024"
+description = "转播引擎底座：TLS provider 幂等初始化、生命周期与 SQLite 存储探活。"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "backup", "hooks"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -52,6 +52,7 @@ pub struct ServiceRegister {
     pub upload_observations: Arc<UploadObservations>,
     /// 本机斗鱼登录 Cookie 的持久化续期与运行时读取。
     pub douyu_keeper: Arc<DouyuCookieKeeper>,
+    pub relay: Arc<biliup_relay::RelayService>,
     /// 房间封面的后台刷新任务，与服务一起停止。
     pub room_cover_refresh: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
@@ -117,6 +118,7 @@ impl ServiceRegister {
             upload_observations,
             douyu_keeper,
             room_cover_refresh,
+            relay: Arc::new(biliup_relay::RelayService::new()),
             pool,
             managers,
             config: config.clone(),
@@ -142,6 +144,7 @@ impl ServiceRegister {
     }
 
     pub async fn cleanup(&self) {
+        self.relay.shutdown().await;
         if let Some(task) = &self.room_cover_refresh {
             task.abort();
         }

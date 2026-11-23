@@ -42,8 +42,17 @@ impl Role {
                 LogView,
                 FileView,
                 ClipEdit,
+                RelayView,
+                RelayControl,
             ],
-            Role::Viewer => &[StreamerView, PreviewView, ConfigView, LogView, FileView],
+            Role::Viewer => &[
+                StreamerView,
+                PreviewView,
+                ConfigView,
+                LogView,
+                FileView,
+                RelayView,
+            ],
         }
     }
 
@@ -108,6 +117,14 @@ pub enum Permission {
     /// Fleet 控制面：生成加入票据、移除节点
     #[serde(rename = "node.manage")]
     NodeManage,
+    #[serde(rename = "relay.view")]
+    RelayView,
+    #[serde(rename = "relay.control")]
+    RelayControl,
+    #[serde(rename = "relay.config")]
+    RelayConfig,
+    #[serde(rename = "relay.cluster")]
+    RelayCluster,
 }
 
 impl Permission {
@@ -127,6 +144,10 @@ impl Permission {
         Permission::UserManage,
         Permission::ClipEdit,
         Permission::NodeManage,
+        Permission::RelayView,
+        Permission::RelayControl,
+        Permission::RelayConfig,
+        Permission::RelayCluster,
     ];
 }
 
@@ -138,6 +159,7 @@ pub fn required_permission(method: &Method, route: &str, raw_path: &str) -> Opti
     use Permission::*;
     let get = method == Method::GET || method == Method::HEAD;
     let permission = match route {
+        "/v1/relay/health" if get => RelayView,
         "/v1/streamers" | "/v1/streamers/page" | "/v1/overview" if get => StreamerView,
         "/v1/streamers" if method == Method::POST || method == Method::PUT => StreamerEdit,
         "/v1/streamers/{id}" if method == Method::DELETE => StreamerEdit,
@@ -502,6 +524,8 @@ mod tests {
             ConfigEdit,
             UserManage,
             NodeManage,
+            RelayConfig,
+            RelayCluster,
         ] {
             assert!(!Role::Operator.has(permission), "{permission:?}");
             assert!(!Role::Viewer.has(permission), "{permission:?}");
@@ -512,11 +536,19 @@ mod tests {
             UploadSubmit,
             TemplateEdit,
             ClipEdit,
+            RelayControl,
         ] {
             assert!(Role::Operator.has(permission), "{permission:?}");
             assert!(!Role::Viewer.has(permission), "{permission:?}");
         }
-        for permission in [StreamerView, PreviewView, ConfigView, LogView, FileView] {
+        for permission in [
+            StreamerView,
+            PreviewView,
+            ConfigView,
+            LogView,
+            FileView,
+            RelayView,
+        ] {
             assert!(Role::Operator.has(permission), "{permission:?}");
             assert!(Role::Viewer.has(permission), "{permission:?}");
         }
