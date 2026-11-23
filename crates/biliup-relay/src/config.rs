@@ -1,0 +1,1957 @@
+use crate::compat::bilibili;
+use crate::storage::Store;
+use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::error::Error;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+
+const CONFIG_DOCUMENT: &str = "config.json";
+const COOKIES_DOCUMENT: &str = "cookies.json";
+const CHANNELS_DOCUMENT: &str = "channels.json";
+
+lazy_static! {
+    static ref CONFIG_CACHE: RwLock<Option<ConfigCacheEntry>> = RwLock::new(None);
+}
+
+const COOKIE_REFRESH_AGE_SECS: u64 = 3600 * 24 * 3;
+static PERSISTENCE_LOCK: Mutex<()> = Mutex::new(());
+static CONFIG_PUBLICATION_LOCK: RwLock<()> = RwLock::new(());
+static CONFIG_REVISION: AtomicU64 = AtomicU64::new(0);
+
+/// `json` is the whole saved config (stream key, cookies, API keys, proxy
+/// credentials), so `Debug` is manual and never prints it.
+pub(crate) struct ConfigSnapshot {
+    json: serde_json::Value,
+    revision: u64,
+    source_keys: Vec<FileCacheKey>,
+}
+
+impl std::fmt::Debug for ConfigSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigSnapshot")
+            .field("json", &"[redacted]")
+            .field("revision", &self.revision)
+            .field("source_keys", &self.source_keys)
+            .finish()
+    }
+}
+
+type FileCacheKey = Option<u64>;
+
+/// Parsed-config cache keyed on the source files' (mtime, len). load_config()
+/// is called on every WebUI request and worker cycle; re-reading and re-parsing
+/// the JSON sources each time is wasted work while nothing changed.
+struct ConfigCacheEntry {
+    source_keys: Vec<FileCacheKey>,
+    config: Config,
+}
+
+fn file_cache_key(name: &str) -> FileCacheKey {
+    crate::storage::global().ok()?.revision(name).ok()?
+}
+
+/// Keys of every file load_config() derives the Config from, in fixed order.
+fn config_source_keys() -> Vec<FileCacheKey> {
+    vec![
+        file_cache_key(CONFIG_DOCUMENT),
+        file_cache_key(COOKIES_DOCUMENT),
+        file_cache_key(CHANNELS_DOCUMENT),
+    ]
+}
+
+fn cached_config(source_keys: &[FileCacheKey]) -> Option<Config> {
+    if source_keys.first()?.is_none() {
+        return None;
+    }
+
+    let cache = CONFIG_CACHE.read().ok()?;
+    let entry = cache.as_ref()?;
+    (entry.source_keys == source_keys
+        && entry
+            .config
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.revision == CONFIG_REVISION.load(Ordering::Acquire)))
+    .then(|| entry.config.clone())
+}
+
+fn store_cached_config(source_keys: Vec<FileCacheKey>, config: &Config) {
+    if let Ok(mut cache) = CONFIG_CACHE.write() {
+        *cache = Some(ConfigCacheEntry {
+            source_keys,
+            config: config.clone(),
+        });
+    }
+}
+
+fn invalidate_config_cache() {
+    if let Ok(mut cache) = CONFIG_CACHE.write() {
+        *cache = None;
+    }
+}
+
+static CONFIG_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChannelsData {
+    pub channels: Vec<Channel>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Channel {
+    pub name: String,
+    /// Bilibili restream title for Niconico (`【转播】{niconico_name}`).
+    /// When omitted, Niconico uses `name` like YouTube/Twitch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub niconico_name: Option<String>,
+    pub aliases: Vec<String>,
+    pub platforms: ChannelPlatforms,
+    pub riot_puuid: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChannelPlatforms {
+    pub youtube: Option<String>,
+    pub twitch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub niconico: Option<String>,
+}
+
+/// Struct representing the overall configuration. `Debug` is manual (below).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Config {
+    /// The read snapshot travels with clones, so all save_config callers get
+    /// conflict detection without persisting runtime metadata in config.json.
+    #[serde(skip)]
+    pub(crate) snapshot: Option<Arc<ConfigSnapshot>>,
+    pub auto_cover: bool,
+    pub enable_anti_collision: bool,
+    pub interval: u64,
+    /// After the source ends while the B站 room is still live, stop that room
+    /// instead of leaving a silent room (Bilibili would flag 挂机 later).
+    #[serde(default = "default_true")]
+    pub auto_stop_after_source_end: bool,
+    /// A room already live for this many hours stops immediately after the
+    /// source ends; a shorter one waits one monitor interval first.
+    #[serde(default = "default_auto_stop_threshold_hours")]
+    pub auto_stop_threshold_hours: u64,
+    pub bililive: BiliLive,
+    pub twitch: Twitch,
+    pub youtube: Youtube,
+    pub holodex_api_key: Option<String>,
+    #[serde(default)]
+    pub holodex_jwt: Option<String>,
+    /// Unix timestamp of last successful Holodex `/user/refresh` call.
+    #[serde(default)]
+    pub holodex_jwt_refreshed_at: Option<u64>,
+    #[serde(default)]
+    pub holodex_username: Option<String>,
+    /// When true, use stored JWT as-is without expiry checks or auto-refresh.
+    #[serde(default)]
+    pub holodex_skip_jwt_verify: bool,
+    /// Inverse of the 基础设置 yt-dlp 兜底 (rescue) switch. When true
+    /// (default) and a Holodex or YouTube key is set, the YouTube monitor
+    /// trusts the index (Holodex + discovery, corrected by `videos.list`) with a
+    /// 5-min yt-dlp safety probe. When false, yt-dlp queries YouTube every tick.
+    #[serde(default = "default_true")]
+    pub holodex_monitor_gate: bool,
+    /// Optional YouTube Data API keys, one per line or comma separated (see
+    /// `youtube_api_keys`). When set, stream rows are re-classified with
+    /// `videos.list` before the monitor and the Holodex panel use them.
+    #[serde(default)]
+    pub youtube_api_key: Option<String>,
+    /// Read channel RSS feeds. Uploads polling and WebSub remain independent.
+    #[serde(default = "default_true")]
+    pub youtube_rss_enabled: bool,
+    /// Public URL YouTube's WebSub hub calls, e.g.
+    /// `https://yt.example.com/websub/youtube`. Empty turns WebSub off.
+    #[serde(default)]
+    pub youtube_websub_callback_url: Option<String>,
+    /// Port of the callback-only listener (never the WebUI port).
+    #[serde(default = "default_websub_port")]
+    pub youtube_websub_port: u16,
+    pub riot_api_key: Option<String>,
+    pub enable_lol_monitor: bool,
+    pub lol_monitor_interval: Option<u64>,
+    pub anti_collision_list: HashMap<String, i32>,
+    /// Dashboard visibility only; never changes priority monitoring.
+    #[serde(default)]
+    pub show_priority_channel: bool,
+    #[serde(default = "default_true")]
+    pub show_twitch: bool,
+    #[serde(default)]
+    pub show_niconico: bool,
+    #[serde(default)]
+    pub priority_channel: PriorityChannel,
+    #[serde(default = "default_true")]
+    pub enable_youtube_monitor: bool,
+    #[serde(default = "default_true")]
+    pub enable_twitch_monitor: bool,
+    /// PRD 10-20-warn-hold-exempt: resolved monitored-channel identities whose
+    /// post-warning/cut hold is skipped when the matched reason is ticked.
+    #[serde(default)]
+    pub warning_hold_exempt: Vec<crate::plugins::warning_exempt::ExemptChannel>,
+    /// Built-in reason ids allowed to release an exempt channel; low tier by
+    /// default. Unknown ids are refused by the settings API and ignored on a
+    /// peer push.
+    #[serde(default = "default_warning_hold_exempt_reasons")]
+    pub warning_hold_exempt_reasons: Vec<String>,
+    /// Apply the low-risk (挂机/录播) class to every monitored channel; the
+    /// mid/high classes still need an explicit exempt-channel entry.
+    #[serde(default)]
+    pub warning_hold_exempt_all_low_risk: bool,
+    #[serde(default)]
+    pub niconico: Niconico,
+    #[serde(default)]
+    pub cluster: ClusterConfig,
+    /// Local 统计 history (design §13). Per node; never synced or backed up.
+    #[serde(default)]
+    pub history: HistoryConfig,
+}
+
+/// Stream keys, API keys, tokens and session cookies never reach `Debug`
+/// output (and so never a log line or a panic message): only whether each
+/// one is set.
+pub(crate) fn secret(value: &str) -> &'static str {
+    if value.is_empty() {
+        "[empty]"
+    } else {
+        "[redacted]"
+    }
+}
+
+pub(crate) fn secret_opt(value: &Option<String>) -> &'static str {
+    value.as_deref().map_or("[unset]", secret)
+}
+
+/// A proxy URL with any userinfo (`user:pass@`) replaced by `[redacted]@`;
+/// scheme, host and port are kept. The last `@` before any query wins, so an
+/// unencoded `/` or `@` in a password is masked too. Text without `@` is
+/// returned unchanged.
+pub(crate) fn mask_proxy(url: &str) -> String {
+    let start = url.find("://").map_or(0, |at| at + 3);
+    let end = url[start..]
+        .find(['?', '#'])
+        .map_or(url.len(), |at| start + at);
+    match url[start..end].rfind('@') {
+        Some(at) => format!("{}[redacted]{}", &url[..start], &url[start + at..]),
+        None => url.to_string(),
+    }
+}
+
+pub(crate) fn mask_proxy_opt(value: &Option<String>) -> Option<String> {
+    value.as_deref().map(mask_proxy)
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("snapshot", &self.snapshot)
+            .field("auto_cover", &self.auto_cover)
+            .field("enable_anti_collision", &self.enable_anti_collision)
+            .field("interval", &self.interval)
+            .field("bililive", &self.bililive)
+            .field("twitch", &self.twitch)
+            .field("youtube", &self.youtube)
+            .field("holodex_api_key", &secret_opt(&self.holodex_api_key))
+            .field("holodex_jwt", &secret_opt(&self.holodex_jwt))
+            .field("holodex_jwt_refreshed_at", &self.holodex_jwt_refreshed_at)
+            .field("holodex_username", &self.holodex_username)
+            .field("holodex_skip_jwt_verify", &self.holodex_skip_jwt_verify)
+            .field("holodex_monitor_gate", &self.holodex_monitor_gate)
+            .field("youtube_api_key", &secret_opt(&self.youtube_api_key))
+            .field("youtube_rss_enabled", &self.youtube_rss_enabled)
+            .field(
+                "youtube_websub_callback_url",
+                &self.youtube_websub_callback_url,
+            )
+            .field("youtube_websub_port", &self.youtube_websub_port)
+            .field("riot_api_key", &secret_opt(&self.riot_api_key))
+            .field("enable_lol_monitor", &self.enable_lol_monitor)
+            .field("lol_monitor_interval", &self.lol_monitor_interval)
+            .field("anti_collision_list", &self.anti_collision_list)
+            .field("show_priority_channel", &self.show_priority_channel)
+            .field("show_twitch", &self.show_twitch)
+            .field("show_niconico", &self.show_niconico)
+            .field("priority_channel", &self.priority_channel)
+            .field("enable_youtube_monitor", &self.enable_youtube_monitor)
+            .field("enable_twitch_monitor", &self.enable_twitch_monitor)
+            .field("niconico", &self.niconico)
+            .field("cluster", &self.cluster)
+            .field("history", &self.history)
+            .finish()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ClusterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_cluster_node_id")]
+    pub node_id: String,
+    #[serde(default = "default_cluster_node_name")]
+    pub node_name: String,
+    #[serde(default)]
+    pub public_api_url: String,
+    #[serde(default)]
+    pub peers: Vec<ClusterPeer>,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default = "default_cluster_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_cluster_failover_timeout_secs")]
+    pub failover_timeout_secs: u64,
+    #[serde(default = "default_cluster_lease_ttl_secs")]
+    pub lease_ttl_secs: u64,
+    #[serde(default)]
+    pub sync_monitored_channels: bool,
+    #[serde(default = "default_cluster_auto_failover")]
+    pub auto_failover: bool,
+    #[serde(default)]
+    pub thresholds: ClusterHealthThresholds,
+    #[serde(default)]
+    pub public_status: PublicStatusConfig,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            node_id: default_cluster_node_id(),
+            node_name: default_cluster_node_name(),
+            public_api_url: String::new(),
+            peers: Vec::new(),
+            priority: 0,
+            heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
+            failover_timeout_secs: default_cluster_failover_timeout_secs(),
+            lease_ttl_secs: default_cluster_lease_ttl_secs(),
+            sync_monitored_channels: false,
+            auto_failover: default_cluster_auto_failover(),
+            thresholds: ClusterHealthThresholds::default(),
+            public_status: PublicStatusConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ClusterPeer {
+    pub node_id: String,
+    #[serde(default)]
+    pub name: String,
+    pub api_url: String,
+    #[serde(default)]
+    pub priority: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ClusterHealthThresholds {
+    #[serde(default = "default_cluster_max_failed_restarts")]
+    pub max_failed_restarts: u32,
+    #[serde(default = "default_cluster_max_external_api_failures")]
+    pub max_external_api_failures: u32,
+    #[serde(default = "default_cluster_external_api_failure_window_secs")]
+    pub external_api_failure_window_secs: u64,
+}
+
+impl Default for ClusterHealthThresholds {
+    fn default() -> Self {
+        Self {
+            max_failed_restarts: default_cluster_max_failed_restarts(),
+            max_external_api_failures: default_cluster_max_external_api_failures(),
+            external_api_failure_window_secs: default_cluster_external_api_failure_window_secs(),
+        }
+    }
+}
+
+/// Public read-only status page, served by one node chosen for its bandwidth
+/// rather than by who currently holds the stream. Empty `node_id` disables it
+/// everywhere.
+///
+/// The listener is meant to sit behind a tunnel, so `bind` stays on loopback
+/// unless it is set explicitly.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct PublicStatusConfig {
+    #[serde(default)]
+    pub node_id: String,
+    #[serde(default = "default_public_status_bind")]
+    pub bind: String,
+    #[serde(default = "default_public_status_port")]
+    pub port: u16,
+    /// Unused: the public page follows the channels list, whose Holodex
+    /// backstop runs every 5 min with a YouTube key (60s without). Kept so
+    /// saved configs still load.
+    #[serde(default = "default_public_status_holodex_refresh_secs")]
+    pub holodex_refresh_secs: u64,
+    /// Advertised in reply to the `%查询` danmaku command. Empty means silent.
+    #[serde(default)]
+    pub public_url: String,
+}
+
+impl Default for PublicStatusConfig {
+    fn default() -> Self {
+        Self {
+            node_id: String::new(),
+            bind: default_public_status_bind(),
+            port: default_public_status_port(),
+            holodex_refresh_secs: default_public_status_holodex_refresh_secs(),
+            public_url: String::new(),
+        }
+    }
+}
+
+/// One live danmaku may use up to 80 display columns for this account: a
+/// wide (mostly CJK) character counts 2, ASCII 1 — i.e. 40 Chinese or 80
+/// Latin/digit characters. The warning copy and `%查询` advert share it.
+pub const DANMAKU_MAX_WIDTH: usize = 80;
+
+/// `%查询` answers carry the page as `网页详情：<url>`; the prefix eats into
+/// the same 80-column budget.
+pub const DANMAKU_ADVERT_PREFIX: &str = "网页详情：";
+
+/// Display columns a live danmaku text occupies. Wide characters (CJK,
+/// fullwidth forms, emoji) count 2, everything else counts as 1.
+pub fn danmaku_width(text: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+
+    text.chars().map(|ch| ch.width().unwrap_or(0)).sum()
+}
+
+impl PublicStatusConfig {
+    /// Whether this node is the one that should serve the page.
+    pub fn runs_on(&self, node_id: &str) -> bool {
+        !self.node_id.trim().is_empty() && self.node_id.trim() == node_id.trim()
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !self.node_id.trim().is_empty()
+    }
+
+    /// The `网页详情：<url>` line sent in reply to `%查询`, or `None` when unset or
+    /// too long to survive as a danmaku.
+    pub fn danmaku_advert(&self) -> Option<String> {
+        let url = self.public_url.trim();
+        if url.is_empty() {
+            return None;
+        }
+        let advert = format!("{DANMAKU_ADVERT_PREFIX}{url}");
+        (danmaku_width(&advert) <= DANMAKU_MAX_WIDTH).then_some(advert)
+    }
+
+    /// How many display columns the URL itself may use once the prefix is
+    /// counted.
+    pub fn max_public_url_width() -> usize {
+        DANMAKU_MAX_WIDTH - danmaku_width(DANMAKU_ADVERT_PREFIX)
+    }
+
+    /// Rejects settings that would make the listener unusable or expose more
+    /// than intended. Callers persist only what passes.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("公开状态页端口不能为 0".to_string());
+        }
+        if self.bind.trim().is_empty() {
+            return Err("公开状态页监听地址不能为空".to_string());
+        }
+        crate::compat::webui::parse_bind(&self.bind)?;
+        let url = self.public_url.trim();
+        if !url.is_empty() && danmaku_width(url) > Self::max_public_url_width() {
+            return Err(format!(
+                "公开地址超过 {} 个字符宽度，加上「{}」会超出弹幕上限；请用更短的域名",
+                Self::max_public_url_width(),
+                DANMAKU_ADVERT_PREFIX
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn default_public_status_bind() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_public_status_port() -> u16 {
+    23234
+}
+
+fn default_public_status_holodex_refresh_secs() -> u64 {
+    30
+}
+
+fn default_cluster_node_id() -> String {
+    std::env::var("BILISTREAM_NODE_ID").unwrap_or_else(|_| {
+        std::env::var("HOSTNAME")
+            .ok()
+            .filter(|hostname| !hostname.trim().is_empty())
+            .unwrap_or_else(|| "local".to_string())
+    })
+}
+
+fn default_cluster_node_name() -> String {
+    default_cluster_node_id()
+}
+
+fn default_cluster_heartbeat_interval_secs() -> u64 {
+    5
+}
+
+fn default_cluster_failover_timeout_secs() -> u64 {
+    15
+}
+
+fn default_cluster_lease_ttl_secs() -> u64 {
+    20
+}
+
+fn default_cluster_auto_failover() -> bool {
+    true
+}
+
+fn default_cluster_max_failed_restarts() -> u32 {
+    3
+}
+
+fn default_cluster_max_external_api_failures() -> u32 {
+    3
+}
+
+fn default_cluster_external_api_failure_window_secs() -> u64 {
+    60
+}
+
+/// FFmpeg HLS timeshift cache settings.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FfmpegCache {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ffmpeg_cache_latency_secs")]
+    pub latency_secs: u64,
+}
+
+impl Default for FfmpegCache {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            latency_secs: default_ffmpeg_cache_latency_secs(),
+        }
+    }
+}
+
+fn default_ffmpeg_cache_latency_secs() -> u64 {
+    8
+}
+
+/// Struct representing priority channel configuration.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PriorityChannel {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub channel_name: String,
+    #[serde(default)]
+    pub youtube_channel_id: String,
+    #[serde(default)]
+    pub twitch_channel_id: String,
+    #[serde(default = "default_priority_area")]
+    pub default_area: u64,
+    #[serde(default)]
+    pub auto_restart: bool,
+}
+
+impl Default for PriorityChannel {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channel_name: String::new(),
+            youtube_channel_id: String::new(),
+            twitch_channel_id: String::new(),
+            default_area: 235,
+            auto_restart: false,
+        }
+    }
+}
+
+fn default_priority_area() -> u64 {
+    235
+}
+
+/// Struct representing BiliLive-specific configuration. `Debug` is manual.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BiliLive {
+    pub enable_danmaku_command: bool,
+    pub room: i32,
+    pub bili_rtmp_url: String,
+    pub bili_rtmp_key: String,
+    #[serde(skip)]
+    pub credentials: Credentials,
+}
+
+impl std::fmt::Debug for BiliLive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BiliLive")
+            .field("enable_danmaku_command", &self.enable_danmaku_command)
+            .field("room", &self.room)
+            .field("bili_rtmp_url", &self.bili_rtmp_url)
+            .field("bili_rtmp_key", &secret(&self.bili_rtmp_key))
+            .field("credentials", &self.credentials)
+            .finish()
+    }
+}
+
+/// Struct to hold credential information extracted from cookies.json.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Credentials {
+    pub sessdata: String,
+    pub bili_jct: String,
+    pub dede_user_id: String,
+    pub dede_user_id_ckmd5: String,
+    pub buvid3: String,
+}
+
+/// Cookie values never reach `Debug` output (and so never a log line or a
+/// panic message): only whether each one is set.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("sessdata", &secret(&self.sessdata))
+            .field("bili_jct", &secret(&self.bili_jct))
+            .field("dede_user_id", &secret(&self.dede_user_id))
+            .field("dede_user_id_ckmd5", &secret(&self.dede_user_id_ckmd5))
+            .field("buvid3", &secret(&self.buvid3))
+            .finish()
+    }
+}
+
+/// Struct representing Twitch configuration. `Debug` is manual.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Twitch {
+    #[serde(default = "default_true")]
+    pub enable_monitor: bool,
+    #[serde(default)]
+    pub channel_name: String,
+    #[serde(default)]
+    pub area_v2: u64,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub proxy_region: String,
+    #[serde(default = "default_quality")]
+    pub quality: String,
+    #[serde(default)]
+    pub proxy: Option<String>,
+    #[serde(default)]
+    pub crop: Option<CropConfig>,
+    #[serde(default)]
+    pub ffmpeg_cache: FfmpegCache,
+}
+
+/// Struct representing YouTube configuration. `Debug` is manual.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Youtube {
+    #[serde(default = "default_true")]
+    pub enable_monitor: bool,
+    #[serde(default)]
+    pub channel_name: String,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub area_v2: u64,
+    #[serde(default = "default_quality")]
+    pub quality: String,
+    #[serde(default)]
+    pub cookies_file: Option<String>,
+    #[serde(default)]
+    pub cookies_from_browser: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+    #[serde(default)]
+    pub deno_path: Option<String>,
+    #[serde(default)]
+    pub crop: Option<CropConfig>,
+    #[serde(default)]
+    pub ffmpeg_cache: FfmpegCache,
+}
+
+impl std::fmt::Debug for Twitch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Twitch")
+            .field("enable_monitor", &self.enable_monitor)
+            .field("channel_name", &self.channel_name)
+            .field("area_v2", &self.area_v2)
+            .field("channel_id", &self.channel_id)
+            .field("proxy_region", &self.proxy_region)
+            .field("quality", &self.quality)
+            .field("proxy", &mask_proxy_opt(&self.proxy))
+            .field("crop", &self.crop)
+            .field("ffmpeg_cache", &self.ffmpeg_cache)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Youtube {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Youtube")
+            .field("enable_monitor", &self.enable_monitor)
+            .field("channel_name", &self.channel_name)
+            .field("channel_id", &self.channel_id)
+            .field("area_v2", &self.area_v2)
+            .field("quality", &self.quality)
+            .field("cookies_file", &self.cookies_file)
+            .field("cookies_from_browser", &self.cookies_from_browser)
+            .field("proxy", &mask_proxy_opt(&self.proxy))
+            .field("deno_path", &self.deno_path)
+            .field("crop", &self.crop)
+            .field("ffmpeg_cache", &self.ffmpeg_cache)
+            .finish()
+    }
+}
+
+/// Niconico Live restream source. Ingest is streamlink (pre-muxed A+V),
+/// not a standalone m3u8 URL. Channel id/name come from `channels.json` /
+/// the WebUI, same as YouTube and Twitch. `Debug` is manual.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Niconico {
+    #[serde(default)]
+    pub enable_monitor: bool,
+    #[serde(default)]
+    pub channel_name: String,
+    /// Channel slug (`vspo`) or `ch2648162`. Current `lv` is resolved from
+    /// `https://ch.nicovideo.jp/{channel_id}/live`.
+    #[serde(default)]
+    pub channel_id: String,
+    /// Optional pinned program. Used only when `channel_id` is empty.
+    #[serde(default)]
+    pub live_id: String,
+    #[serde(default)]
+    pub area_v2: u64,
+    #[serde(default = "default_quality")]
+    pub quality: String,
+    /// Niconico login cookie value; write-only through the admin API. The
+    /// only Niconico credential: a `cookies_file` key or a stored
+    /// `niconico_cookies.txt` left by 28a20792 is ignored, never read.
+    #[serde(default)]
+    pub user_session: Option<String>,
+    #[serde(default = "default_true")]
+    pub session_check_enabled: bool,
+    #[serde(default)]
+    pub proxy: Option<String>,
+    #[serde(default)]
+    pub crop: Option<CropConfig>,
+    #[serde(default = "default_niconico_ffmpeg_cache")]
+    pub ffmpeg_cache: FfmpegCache,
+}
+
+impl std::fmt::Debug for Niconico {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Niconico")
+            .field("enable_monitor", &self.enable_monitor)
+            .field("channel_name", &self.channel_name)
+            .field("channel_id", &self.channel_id)
+            .field("live_id", &self.live_id)
+            .field("area_v2", &self.area_v2)
+            .field("quality", &self.quality)
+            .field("user_session", &secret_opt(&self.user_session))
+            .field("session_check_enabled", &self.session_check_enabled)
+            .field("proxy", &mask_proxy_opt(&self.proxy))
+            .field("crop", &self.crop)
+            .field("ffmpeg_cache", &self.ffmpeg_cache)
+            .finish()
+    }
+}
+
+impl Default for Niconico {
+    fn default() -> Self {
+        Self {
+            enable_monitor: false,
+            channel_name: String::new(),
+            channel_id: String::new(),
+            live_id: String::new(),
+            area_v2: 235,
+            quality: default_quality(),
+            user_session: None,
+            session_check_enabled: true,
+            proxy: None,
+            crop: None,
+            ffmpeg_cache: default_niconico_ffmpeg_cache(),
+        }
+    }
+}
+
+fn default_niconico_ffmpeg_cache() -> FfmpegCache {
+    FfmpegCache {
+        enabled: true,
+        latency_secs: 12,
+    }
+}
+
+/// Struct representing crop configuration for video filtering
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CropConfig {
+    pub width: u32,
+    pub height: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+fn default_quality() -> String {
+    "best".to_string()
+}
+
+pub(crate) fn default_websub_port() -> u16 {
+    3151
+}
+
+/// `config.json` → `history` (analytics design §13). Per node: not part of
+/// `ClusterSettings` or `MonitoredConfig`, so it never travels.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct HistoryConfig {
+    pub enabled: bool,
+    /// ffmpeg sample interval, clamped to 5–60 s.
+    pub sample_secs: u64,
+    /// Bilibili count capture interval, clamped to 5–60 s.
+    pub bili_sample_secs: u64,
+    /// Fetch B站 StopLiveData once after a live session ends (+1 retry).
+    pub bili_stop_summary: bool,
+    /// Capture mode (off by default, per node): writes allowlist-redacted
+    /// B站 replies to the git-ignored `.trellis/fixtures/` only.
+    pub capture: bool,
+    pub retention: HistoryRetention,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sample_secs: 10,
+            bili_sample_secs: 5,
+            bili_stop_summary: true,
+            capture: false,
+            retention: HistoryRetention::default(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct HistoryRetention {
+    pub raw_days: u64,
+    pub rollup_days: u64,
+    pub event_days: u64,
+    pub event_rows: u64,
+    pub max_mb: u64,
+}
+
+impl Default for HistoryRetention {
+    fn default() -> Self {
+        Self {
+            raw_days: 7,
+            rollup_days: 90,
+            event_days: 180,
+            event_rows: 200_000,
+            max_mb: 512,
+        }
+    }
+}
+
+pub(crate) fn default_auto_stop_threshold_hours() -> u64 {
+    3
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Default exemption reasons: the low-risk 挂机/录播 class only.
+pub fn default_warning_hold_exempt_reasons() -> Vec<String> {
+    vec![crate::plugins::warning_exempt::ReasonId::IdleRecording
+        .as_str()
+        .to_owned()]
+}
+
+/// Keys in a `youtube_api_key` value: one per line or comma separated,
+/// trimmed and deduplicated in order.
+pub fn parse_api_keys(raw: &str) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for key in raw.split(|c: char| c == ',' || c.is_whitespace()) {
+        if !key.is_empty() && !keys.iter().any(|seen| seen == key) {
+            keys.push(key.to_string());
+        }
+    }
+    keys
+}
+
+impl Config {
+    /// The YouTube Data API key pool; empty turns the feature off.
+    pub fn youtube_api_keys(&self) -> Vec<String> {
+        self.youtube_api_key
+            .as_deref()
+            .map(parse_api_keys)
+            .unwrap_or_default()
+    }
+}
+
+/// Structs to mirror the structure of cookies.json
+/// One cookies.json entry. `Debug` is manual: the name only, never the value.
+#[derive(Deserialize)]
+struct Cookie {
+    name: String,
+    value: String,
+    // Other fields can be added if needed
+}
+
+impl std::fmt::Debug for Cookie {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cookie")
+            .field("name", &self.name)
+            .field("value", &secret(&self.value))
+            .finish()
+    }
+}
+#[derive(Debug, Deserialize)]
+struct CookiesFile {
+    cookie_info: CookieInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct CookieInfo {
+    cookies: Vec<Cookie>,
+    // domains: Vec<String>, // Included if needed
+}
+impl Credentials {
+    /// Extracts credentials from cookies and initializes a Credentials struct.
+    fn from_cookies(cookies: &[Cookie]) -> Result<Self, Box<dyn Error>> {
+        let sessdata = cookies
+            .iter()
+            .find(|cookie| cookie.name == "SESSDATA")
+            .map(|cookie| cookie.value.clone())
+            .ok_or("SESSDATA cookie not found")?;
+
+        let bili_jct = cookies
+            .iter()
+            .find(|cookie| cookie.name == "bili_jct")
+            .map(|cookie| cookie.value.clone())
+            .ok_or("bili_jct cookie not found")?;
+
+        let dede_user_id = cookies
+            .iter()
+            .find(|cookie| cookie.name == "DedeUserID")
+            .map(|cookie| cookie.value.clone())
+            .ok_or("DedeUserID cookie not found")?;
+
+        let dede_user_id_ckmd5 = cookies
+            .iter()
+            .find(|cookie| cookie.name == "DedeUserID__ckMd5")
+            .map(|cookie| cookie.value.clone())
+            .ok_or("DedeUserID__ckMd5 cookie not found")?;
+
+        let buvid3 = cookies
+            .iter()
+            .find(|cookie| cookie.name == "buvid3")
+            .map(|cookie| cookie.value.clone())
+            .unwrap_or_default();
+
+        Ok(Credentials {
+            sessdata,
+            bili_jct,
+            dede_user_id,
+            dede_user_id_ckmd5,
+            buvid3,
+        })
+    }
+}
+
+/// Loads credentials from the specified cookies.json file.
+async fn load_credentials() -> Result<Credentials, Box<dyn Error>> {
+    let cookies_file: CookiesFile = crate::storage::read_document(COOKIES_DOCUMENT)?;
+    Credentials::from_cookies(&cookies_file.cookie_info.cookies)
+}
+
+/// Loads the configuration along with credentials from cookies.json.
+pub async fn load_config() -> Result<Config, Box<dyn Error>> {
+    let revision = CONFIG_REVISION.load(Ordering::Acquire);
+    // The keys are captured before reading: a file swapped mid-load produces a
+    // key mismatch on the next call, which forces a fresh parse.
+    let source_keys = config_source_keys();
+    if let Some(config) = cached_config(&source_keys) {
+        return Ok(config);
+    }
+
+    let mut config = read_config().await?;
+    config.snapshot = Some(Arc::new(ConfigSnapshot {
+        json: serde_json::to_value(&config)?,
+        revision,
+        source_keys: source_keys.clone(),
+    }));
+
+    // Update priority channel info from channels.json
+    update_priority_channel_from_channels(&mut config);
+
+    store_cached_config(source_keys, &config);
+
+    Ok(config)
+}
+
+async fn read_config() -> Result<Config, Box<dyn Error>> {
+    let snapshot = crate::storage::global()?.read_many(&[CONFIG_DOCUMENT, COOKIES_DOCUMENT])?;
+    let config = snapshot
+        .get("config.json")
+        .ok_or("尚未配置，请完成设置向导")?;
+    let cookies = snapshot.get("cookies.json").map(|doc| &doc.value);
+    config_from_documents(&config.value, cookies)
+}
+
+fn config_from_documents(
+    value: &serde_json::Value,
+    cookies: Option<&serde_json::Value>,
+) -> Result<Config, Box<dyn Error>> {
+    let mut config: Config = serde_json::from_value(value.clone())?;
+    config.bililive.credentials = cookies
+        .and_then(|value| serde_json::from_value::<CookiesFile>(value.clone()).ok())
+        .and_then(|file| Credentials::from_cookies(&file.cookie_info.cookies).ok())
+        .unwrap_or_default();
+    Ok(config)
+}
+
+/// Saves the configuration to config.json
+pub async fn save_config(config: &mut Config) -> Result<(), Box<dyn Error>> {
+    save_config_inner(config, false, Box::new(|_| Ok(()))).await
+}
+
+/// Commit an automated decision only if every input source is still current.
+/// Unlike user field edits, an automated plan must not be rebased over newer
+/// settings that may have disabled or redirected the operation.
+pub async fn save_config_if_current(config: &mut Config) -> Result<(), Box<dyn Error>> {
+    save_config_inner(config, true, Box::new(|_| Ok(()))).await
+}
+
+type DocumentEdit =
+    Box<dyn FnOnce(&mut crate::storage::Transaction<'_>) -> std::io::Result<()> + Send>;
+
+pub(crate) async fn save_config_with_transaction<F>(
+    config: &mut Config,
+    edit: F,
+) -> Result<(), Box<dyn Error>>
+where
+    F: FnOnce(&mut crate::storage::Transaction<'_>) -> std::io::Result<()> + Send + 'static,
+{
+    save_config_inner(config, false, Box::new(edit)).await?;
+    crate::plugins::set_config_updated();
+    crate::compat::webui::public::remap_after_areas_change();
+    Ok(())
+}
+
+async fn save_config_inner(
+    config: &mut Config,
+    require_current: bool,
+    documents: DocumentEdit,
+) -> Result<(), Box<dyn Error>> {
+    let edited = serde_json::to_value(&config)?;
+    let snapshot = config.snapshot.clone();
+    let credentials = config.bililive.credentials.clone();
+    // A blocking transaction owns its lock through read/merge/fsync/rename even
+    // if its HTTP caller disconnects. Unrelated edits merge; conflicting edits
+    // fail explicitly instead of silently overwriting newer settings.
+    let mut saved = tokio::task::spawn_blocking(move || -> std::io::Result<Config> {
+        let _guard = PERSISTENCE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if require_current
+            && snapshot
+                .as_ref()
+                .is_none_or(|snapshot| !snapshot_is_current(snapshot))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "configuration changed while planning the operation",
+            ));
+        }
+        let json = commit_config_bundle(
+            crate::storage::global()?,
+            snapshot.as_deref().map(|s| &s.json),
+            &edited,
+            documents,
+        )?;
+        let mut saved: Config = serde_json::from_value(json.clone())?;
+        let _publication = CONFIG_PUBLICATION_LOCK
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let revision = CONFIG_REVISION.fetch_add(1, Ordering::AcqRel) + 1;
+        saved.snapshot = Some(Arc::new(ConfigSnapshot {
+            json,
+            revision,
+            source_keys: config_source_keys(),
+        }));
+        invalidate_config_cache();
+        crate::compat::priority::clear_prefetched_playable_stream();
+        crate::compat::webui::events::publish(crate::compat::webui::events::CONFIG);
+        crate::compat::webui::stream_list::wake();
+        crate::compat::webui::state::request_status_refresh();
+        Ok(saved)
+    })
+    .await
+    .map_err(|error| -> Box<dyn Error> { error.to_string().into() })??;
+    saved.bililive.credentials = load_credentials().await.unwrap_or(credentials);
+    *config = saved;
+    Ok(())
+}
+
+pub(crate) fn config_data_revision(config: &Config) -> u64 {
+    config
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.source_keys.first().copied().flatten())
+        .unwrap_or(0)
+}
+
+pub fn config_is_current(config: &Config) -> bool {
+    config
+        .snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot_is_current(snapshot))
+}
+
+fn snapshot_is_current(snapshot: &ConfigSnapshot) -> bool {
+    snapshot.revision == CONFIG_REVISION.load(Ordering::Acquire)
+        && snapshot.source_keys == config_source_keys()
+}
+
+/// Apply a synchronous runtime update only while its source configuration is
+/// current, excluding a concurrent commit between validation and publication.
+pub fn with_current_config<T>(config: &Config, update: impl FnOnce() -> T) -> Option<T> {
+    let _guard = CONFIG_PUBLICATION_LOCK
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    config_is_current(config).then(update)
+}
+
+#[cfg(test)]
+fn commit_config_snapshot(
+    store: Arc<Store>,
+    base: Option<&serde_json::Value>,
+    edited: &serde_json::Value,
+) -> std::io::Result<serde_json::Value> {
+    commit_config_bundle(store, base, edited, Box::new(|_| Ok(())))
+}
+
+fn commit_config_bundle(
+    store: Arc<Store>,
+    base: Option<&serde_json::Value>,
+    edited: &serde_json::Value,
+    documents: DocumentEdit,
+) -> std::io::Result<serde_json::Value> {
+    let base = base.cloned();
+    let edited = edited.clone();
+    store.transaction(move |tx| {
+        let current = tx
+            .read("config.json")?
+            .map(|doc| config_json_with_defaults(doc.value))
+            .transpose()?;
+        let merged =
+            merge_config_changes(base.as_ref(), Some(&edited), current.as_ref(), "config")?
+                .ok_or_else(|| std::io::Error::other("configuration was removed during edit"))?;
+        tx.write("config.json", merged.clone())?;
+        documents(tx)?;
+        Ok(merged)
+    })
+}
+
+fn config_json_with_defaults(mut value: serde_json::Value) -> std::io::Result<serde_json::Value> {
+    let config: Config = serde_json::from_value(value.clone()).map_err(std::io::Error::other)?;
+    let defaults = serde_json::to_value(config).map_err(std::io::Error::other)?;
+    fn fill(target: &mut serde_json::Value, defaults: serde_json::Value) {
+        if let (Some(target), serde_json::Value::Object(defaults)) =
+            (target.as_object_mut(), defaults)
+        {
+            for (key, value) in defaults {
+                match target.get_mut(&key) {
+                    Some(current) => fill(current, value),
+                    None => {
+                        target.insert(key, value);
+                    }
+                }
+            }
+        }
+    }
+    fill(&mut value, defaults);
+    Ok(value)
+}
+
+fn merge_config_changes(
+    base: Option<&serde_json::Value>,
+    edited: Option<&serde_json::Value>,
+    current: Option<&serde_json::Value>,
+    path: &str,
+) -> std::io::Result<Option<serde_json::Value>> {
+    if base == edited {
+        return Ok(current.cloned());
+    }
+    if current == base || current == edited {
+        return Ok(edited.cloned());
+    }
+    if let (
+        Some(serde_json::Value::Object(base)),
+        Some(serde_json::Value::Object(edited)),
+        Some(serde_json::Value::Object(current)),
+    ) = (base, edited, current)
+    {
+        let mut merged = current.clone();
+        let keys: std::collections::BTreeSet<_> = base.keys().chain(edited.keys()).collect();
+        for key in keys {
+            match merge_config_changes(
+                base.get(key),
+                edited.get(key),
+                current.get(key),
+                &format!("{path}.{key}"),
+            )? {
+                Some(value) => {
+                    merged.insert(key.clone(), value);
+                }
+                None => {
+                    merged.remove(key);
+                }
+            }
+        }
+        return Ok(Some(serde_json::Value::Object(merged)));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("{path} changed during edit; reload and retry"),
+    ))
+}
+
+/// One serialized read/edit/write operation for a stored document.
+///
+/// `name` is the store's record id (for example `"areas.json"`). It looks like
+/// a filename because it is the compatibility id, not because a file exists.
+pub async fn mutate_document<T, R, F>(name: &str, edit: F) -> Result<R, String>
+where
+    T: serde::de::DeserializeOwned + Serialize + Send + 'static,
+    R: Send + 'static,
+    F: FnOnce(&mut T) -> Result<R, String> + Send + 'static,
+{
+    mutate_stored_document(
+        crate::storage::global().map_err(|e| e.to_string())?,
+        name.to_owned(),
+        edit,
+    )
+    .await
+}
+
+async fn mutate_stored_document<T, R, F>(
+    store: Arc<Store>,
+    name: String,
+    edit: F,
+) -> Result<R, String>
+where
+    T: serde::de::DeserializeOwned + Serialize + Send + 'static,
+    R: Send + 'static,
+    F: FnOnce(&mut T) -> Result<R, String> + Send + 'static,
+{
+    let result = tokio::task::spawn_blocking(move || {
+        store.transaction(move |tx| {
+            let doc = tx
+                .read(&name)?
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "数据不存在"))?;
+            let mut data: T = serde_json::from_value(doc.value).map_err(std::io::Error::other)?;
+            let result = edit(&mut data).map_err(std::io::Error::other)?;
+            tx.write(
+                &name,
+                serde_json::to_value(data).map_err(std::io::Error::other)?,
+            )?;
+            Ok(result)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    managed_document_committed();
+    Ok(result)
+}
+
+fn managed_document_committed() {
+    let _publication = CONFIG_PUBLICATION_LOCK
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    CONFIG_REVISION.fetch_add(1, Ordering::AcqRel);
+    invalidate_config_cache();
+    crate::plugins::set_config_updated();
+    crate::compat::webui::state::request_status_refresh();
+    crate::compat::webui::stream_list::wake();
+}
+
+pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let (tmp_path, mut tmp_file) = create_unique_tmp_file(path)?;
+    let write_result = tmp_file.write_all(bytes).and_then(|_| tmp_file.sync_all());
+    drop(tmp_file);
+
+    let result = write_result.and_then(|_| fs::rename(&tmp_path, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+fn create_unique_tmp_file(path: &Path) -> std::io::Result<(PathBuf, fs::File)> {
+    const MAX_ATTEMPTS: usize = 16;
+    for _ in 0..MAX_ATTEMPTS {
+        let tmp_path = unique_tmp_path(path);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => return Ok((tmp_path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "failed to reserve unique config temporary file",
+    ))
+}
+
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.json");
+    let suffix = CONFIG_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(
+        "{}.tmp-{}-{}",
+        file_name,
+        std::process::id(),
+        suffix
+    ))
+}
+
+pub async fn refresh_credentials() -> Result<(), Box<dyn std::error::Error>> {
+    let doc = crate::storage::global()?
+        .read(COOKIES_DOCUMENT)?
+        .ok_or("请在设置向导中登录哔哩哔哩")?;
+    if crate::storage::now().saturating_sub(doc.updated_at) > COOKIE_REFRESH_AGE_SECS {
+        tracing::info!("正在刷新哔哩哔哩登录状态");
+        bilibili::renew().await?;
+    }
+    Ok(())
+}
+
+/// Loads the installation's managed channel roster.
+pub fn load_channels() -> Result<ChannelsData, Box<dyn Error>> {
+    Ok(crate::storage::read_document(CHANNELS_DOCUMENT)?)
+}
+
+/// Finds channel info by name from channels.json
+pub fn find_channel_by_name(name: &str) -> Option<Channel> {
+    if let Ok(channels_data) = load_channels() {
+        channels_data
+            .channels
+            .into_iter()
+            .find(|ch| ch.name == name)
+    } else {
+        None
+    }
+}
+
+/// Updates priority channel config with channel info from channels.json
+pub fn update_priority_channel_from_channels(config: &mut Config) {
+    let channel = find_channel_by_name(&config.priority_channel.channel_name);
+    apply_priority_channel_lookup(&mut config.priority_channel, channel.as_ref());
+}
+
+pub(crate) fn update_priority_channel_from_value(config: &mut Config, value: &serde_json::Value) {
+    let channel = serde_json::from_value::<ChannelsData>(value.clone())
+        .ok()
+        .and_then(|data| {
+            data.channels
+                .into_iter()
+                .find(|channel| channel.name == config.priority_channel.channel_name)
+        });
+    apply_priority_channel_lookup(&mut config.priority_channel, channel.as_ref());
+}
+
+fn apply_priority_channel_lookup(priority: &mut PriorityChannel, channel: Option<&Channel>) {
+    // A removed/renamed channel must not retain the preceding target's IDs.
+    priority.youtube_channel_id = channel
+        .and_then(|channel| channel.platforms.youtube.clone())
+        .unwrap_or_default();
+    priority.twitch_channel_id = channel
+        .and_then(|channel| channel.platforms.twitch.clone())
+        .unwrap_or_default();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn config_debug_never_contains_a_stream_key_api_key_or_session() {
+        let mut config = crate::test_support::config("synthetic-node", 0);
+        config.bililive.bili_rtmp_key = "synthetic-rtmp-key-3d9e".into();
+        config.bililive.credentials.sessdata = "synthetic-sessdata-a1".into();
+        config.holodex_api_key = Some("synthetic-holodex-key-77".into());
+        config.holodex_jwt = Some("synthetic-holodex-jwt-42".into());
+        config.youtube_api_key = Some("synthetic-youtube-key-19".into());
+        config.riot_api_key = Some("synthetic-riot-key-08".into());
+        config.niconico.user_session = Some("synthetic-nico-session-5c".into());
+        for text in [
+            format!("{config:?}"),
+            format!("{config:#?}"),
+            format!("{:?}", config.bililive),
+            format!("{:#?}", config.niconico),
+        ] {
+            for value in [
+                "synthetic-rtmp-key-3d9e",
+                "synthetic-sessdata-a1",
+                "synthetic-holodex-key-77",
+                "synthetic-holodex-jwt-42",
+                "synthetic-youtube-key-19",
+                "synthetic-riot-key-08",
+                "synthetic-nico-session-5c",
+            ] {
+                assert!(!text.contains(value), "{value} leaked into Debug output");
+            }
+            assert!(text.contains("[redacted]"));
+        }
+        let text = format!("{:?}", config.bililive);
+        assert!(text.contains("bili_rtmp_key: \"[redacted]\""), "{text}");
+        config.bililive.bili_rtmp_key.clear();
+        config.holodex_api_key = None;
+        let text = format!("{config:?}");
+        assert!(text.contains("bili_rtmp_key: \"[empty]\""));
+        assert!(text.contains("holodex_api_key: \"[unset]\""));
+    }
+
+    #[test]
+    fn mask_proxy_hides_only_the_userinfo() {
+        use super::{mask_proxy, mask_proxy_opt};
+        for (raw, masked) in [
+            (
+                "http://synthetic-user:synthetic-pass@proxy.example:8080",
+                "http://[redacted]@proxy.example:8080",
+            ),
+            (
+                "socks5h://synthetic-user@10.0.0.2:1080/",
+                "socks5h://[redacted]@10.0.0.2:1080/",
+            ),
+            (
+                "synthetic-user:synthetic-pass@proxy.example:3128",
+                "[redacted]@proxy.example:3128",
+            ),
+            (
+                "http://synthetic-user:synth/p@ss@proxy.example:8080",
+                "http://[redacted]@proxy.example:8080",
+            ),
+            ("http://proxy.example:8080", "http://proxy.example:8080"),
+            ("socks5://127.0.0.1:1080", "socks5://127.0.0.1:1080"),
+            ("", ""),
+        ] {
+            assert_eq!(mask_proxy(raw), masked, "{raw}");
+        }
+        assert_eq!(mask_proxy_opt(&None), None);
+        let mut config = crate::test_support::config("synthetic-node", 0);
+        let proxy = Some("http://synthetic-user:synthetic-pass@proxy.example:8080".to_string());
+        config.twitch.proxy = proxy.clone();
+        config.youtube.proxy = proxy.clone();
+        config.niconico.proxy = proxy;
+        for text in [
+            format!("{config:?}"),
+            format!("{:#?}", config.twitch),
+            format!("{:#?}", config.youtube),
+            format!("{:#?}", config.niconico),
+        ] {
+            assert!(!text.contains("synthetic-pass") && !text.contains("synthetic-user"));
+            assert!(text.contains("[redacted]@proxy.example:8080"), "{text}");
+        }
+    }
+
+    #[test]
+    fn credentials_debug_never_contains_cookie_values() {
+        let credentials = super::Credentials {
+            sessdata: "synthetic-sessdata-7f3a".into(),
+            bili_jct: "synthetic-csrf-91c2".into(),
+            dede_user_id: "synthetic-uid-55".into(),
+            dede_user_id_ckmd5: "synthetic-ckmd5-0b".into(),
+            buvid3: String::new(),
+        };
+        let config = super::BiliLive {
+            enable_danmaku_command: false,
+            room: 1,
+            bili_rtmp_url: String::new(),
+            bili_rtmp_key: "synthetic-rtmp-key-c4e1".into(),
+            credentials: credentials.clone(),
+        };
+        for text in [
+            format!("{credentials:?}"),
+            format!("{credentials:#?}"),
+            format!("{config:?}"),
+        ] {
+            for value in [
+                "synthetic-sessdata-7f3a",
+                "synthetic-csrf-91c2",
+                "synthetic-uid-55",
+                "synthetic-ckmd5-0b",
+                "synthetic-rtmp-key-c4e1",
+            ] {
+                assert!(!text.contains(value), "{value} leaked into Debug output");
+            }
+            assert!(text.contains("[redacted]") && text.contains("[empty]"));
+        }
+    }
+
+    #[test]
+    fn config_snapshot_debug_never_contains_the_saved_json() {
+        let snapshot = super::ConfigSnapshot {
+            json: serde_json::json!({
+                "bililive": {
+                    "bili_rtmp_key": "synthetic-snap-rtmp-key-61",
+                    "credentials": {"sessdata": "synthetic-snap-sessdata-2b"},
+                },
+                "holodex_api_key": "synthetic-snap-holodex-key-90",
+                "youtube_api_key": "synthetic-snap-youtube-key-3e",
+                "riot_api_key": "synthetic-snap-riot-key-d7",
+                "niconico": {"user_session": "synthetic-snap-nico-session-44"},
+                "twitch": {"proxy": "http://synthetic-snap-user:synthetic-snap-pass@proxy.example:8080"},
+            }),
+            revision: 7,
+            source_keys: vec![Some(11), None],
+        };
+        let mut config = crate::test_support::config("synthetic-node", 0);
+        config.snapshot = Some(std::sync::Arc::new(snapshot));
+        let snapshot = config.snapshot.as_deref().unwrap();
+        for text in [
+            format!("{snapshot:?}"),
+            format!("{snapshot:#?}"),
+            format!("{config:?}"),
+            format!("{config:#?}"),
+        ] {
+            for value in [
+                "synthetic-snap-rtmp-key-61",
+                "synthetic-snap-sessdata-2b",
+                "synthetic-snap-holodex-key-90",
+                "synthetic-snap-youtube-key-3e",
+                "synthetic-snap-riot-key-d7",
+                "synthetic-snap-nico-session-44",
+                "synthetic-snap-user",
+                "synthetic-snap-pass",
+                "proxy.example",
+            ] {
+                assert!(!text.contains(value), "{value} leaked into Debug output");
+            }
+        }
+        let text = format!("{snapshot:?}");
+        assert!(text.contains("json: \"[redacted]\""), "{text}");
+        assert!(text.contains("revision: 7"), "{text}");
+        assert!(text.contains("source_keys: [Some(11), None]"), "{text}");
+    }
+
+    #[test]
+    fn cookie_debug_shows_the_name_but_never_the_value() {
+        let file: super::CookiesFile = serde_json::from_value(serde_json::json!({
+            "cookie_info": {"cookies": [
+                {"name": "SESSDATA", "value": "synthetic-cookie-sessdata-5a"},
+                {"name": "bili_jct", "value": "synthetic-cookie-csrf-0e"},
+            ]}
+        }))
+        .unwrap();
+        for text in [format!("{file:?}"), format!("{file:#?}")] {
+            assert!(!text.contains("synthetic-cookie-sessdata-5a"), "{text}");
+            assert!(!text.contains("synthetic-cookie-csrf-0e"), "{text}");
+            assert!(
+                text.contains("SESSDATA") && text.contains("[redacted]"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_priority_channel_clears_previous_ids() {
+        let mut priority = super::PriorityChannel {
+            youtube_channel_id: "old-yt".into(),
+            twitch_channel_id: "old-tw".into(),
+            ..Default::default()
+        };
+        super::apply_priority_channel_lookup(&mut priority, None);
+        assert!(priority.youtube_channel_id.is_empty());
+        assert!(priority.twitch_channel_id.is_empty());
+    }
+
+    use super::*;
+
+    fn test_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bilistream-config-review-{}-{}",
+            std::process::id(),
+            CONFIG_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fixture_json() -> serde_json::Value {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "auto_cover": false, "enable_anti_collision": false, "interval": 15,
+            "bililive": { "enable_danmaku_command": false, "room": 1, "bili_rtmp_url": "", "bili_rtmp_key": "" },
+            "youtube": {}, "twitch": {}, "enable_lol_monitor": false, "anti_collision_list": {}
+        })).unwrap();
+        serde_json::to_value(config).unwrap()
+    }
+
+    #[test]
+    fn api_keys_split_on_lines_and_commas_without_duplicates() {
+        assert!(parse_api_keys("").is_empty());
+        assert!(parse_api_keys(" \n ,, ").is_empty());
+        assert_eq!(parse_api_keys("one"), vec!["one"]);
+        assert_eq!(
+            parse_api_keys(" one\r\ntwo, three,\n\none "),
+            vec!["one", "two", "three"]
+        );
+    }
+
+    fn isolated_store(dir: &Path) -> Arc<Store> {
+        Store::open(dir.join("data"), dir.join("keys/master.key")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn settings_are_readable_without_credentials() {
+        let config = config_from_documents(&fixture_json(), None).unwrap();
+        assert_eq!(config.interval, 15);
+        assert!(config.bililive.credentials.sessdata.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_config_edits_preserve_unrelated_fields() {
+        let dir = test_dir();
+        let store = isolated_store(&dir);
+        let mut base = fixture_json();
+        base["extension"] = serde_json::json!({"preserved":true});
+        store.write("config.json", base.clone()).unwrap();
+        // A typed config snapshot deliberately lacks unrecognized extension keys.
+        let base = serde_json::to_value(serde_json::from_value::<Config>(base).unwrap()).unwrap();
+        let mut tasks = Vec::new();
+        for id in 0..10 {
+            let (store, base) = (Arc::clone(&store), base.clone());
+            tasks.push(tokio::task::spawn_blocking(move || {
+                let mut edited = base.clone();
+                edited["anti_collision_list"][format!("room-{id}")] = serde_json::json!(id);
+                commit_config_snapshot(store, Some(&base), &edited).unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let current = store.read("config.json").unwrap().unwrap().value;
+        assert_eq!(
+            current["anti_collision_list"].as_object().unwrap().len(),
+            10
+        );
+        assert_eq!(current["extension"]["preserved"], true);
+        let mut first = base.clone();
+        first["interval"] = serde_json::json!(20);
+        let mut stale = base.clone();
+        stale["interval"] = serde_json::json!(30);
+        commit_config_snapshot(Arc::clone(&store), Some(&base), &first).unwrap();
+        assert_eq!(
+            commit_config_snapshot(Arc::clone(&store), Some(&base), &stale)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            store.read("config.json").unwrap().unwrap().value["interval"],
+            20
+        );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn yesterday_config_can_enable_new_fields_without_false_conflict() {
+        let dir = test_dir();
+        let store = isolated_store(&dir);
+        let mut old = fixture_json();
+        for name in [
+            "show_priority_channel",
+            "show_twitch",
+            "show_niconico",
+            "youtube_rss_enabled",
+            "niconico",
+        ] {
+            old.as_object_mut().unwrap().remove(name);
+        }
+        old["extension"] = serde_json::json!({"keep":"old-custom-value"});
+        store.write("config.json", old.clone()).unwrap();
+        let loaded = config_from_documents(&old, None).unwrap();
+        assert!(!loaded.show_priority_channel);
+        assert!(loaded.show_twitch);
+        assert!(loaded.youtube_rss_enabled);
+        let base = serde_json::to_value(&loaded).unwrap();
+        let mut edited = base.clone();
+        edited["show_priority_channel"] = serde_json::json!(true);
+        let saved = commit_config_snapshot(Arc::clone(&store), Some(&base), &edited).unwrap();
+        assert_eq!(saved["show_priority_channel"], true);
+        assert_eq!(saved["extension"]["keep"], "old-custom-value");
+        assert_eq!(saved["youtube"]["channel_id"], old["youtube"]["channel_id"]);
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn merge_rejects_conflicting_deletion_and_preserves_other_keys() {
+        let base = serde_json::json!({"a": 1, "b": [1]});
+        let edited = serde_json::json!({"b": [1]});
+        let current = serde_json::json!({"a": 2, "b": [1]});
+        assert!(
+            merge_config_changes(Some(&base), Some(&edited), Some(&current), "config").is_err()
+        );
+        let current = serde_json::json!({"a": 1, "b": [2], "c": true});
+        assert_eq!(
+            merge_config_changes(Some(&base), Some(&edited), Some(&current), "config").unwrap(),
+            Some(serde_json::json!({"b": [2], "c": true}))
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_replacement_initializes_and_supports_edits() {
+        let dir = test_dir();
+        let store = isolated_store(&dir);
+        store
+            .write("managed.json", serde_json::json!({"count":4}))
+            .unwrap();
+        mutate_stored_document(
+            Arc::clone(&store),
+            "managed.json".into(),
+            |data: &mut serde_json::Value| {
+                data["count"] = serde_json::json!(data["count"].as_u64().unwrap() + 1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.read("managed.json").unwrap().unwrap().value["count"],
+            5
+        );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_caller_does_not_abandon_a_managed_transaction() {
+        let dir = test_dir();
+        let store = isolated_store(&dir);
+        store.write("counter.json", serde_json::json!(0)).unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = Arc::clone(&store);
+        let caller = tokio::spawn(async move {
+            mutate_stored_document(first, "counter.json".into(), move |count: &mut u64| {
+                started_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                *count += 1;
+                Ok(())
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+        mutate_stored_document(
+            Arc::clone(&store),
+            "counter.json".into(),
+            |count: &mut u64| {
+                *count += 1;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.read("counter.json").unwrap().unwrap().value, 2);
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn public_status(node_id: &str) -> PublicStatusConfig {
+        PublicStatusConfig {
+            node_id: node_id.to_string(),
+            ..PublicStatusConfig::default()
+        }
+    }
+
+    #[test]
+    fn public_status_defaults_to_disabled_on_loopback() {
+        let cfg = PublicStatusConfig::default();
+        assert!(!cfg.is_enabled());
+        assert!(!cfg.runs_on("ny"));
+        assert_eq!(cfg.bind, "127.0.0.1");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn public_status_runs_only_on_the_chosen_node() {
+        let cfg = public_status("ny");
+        assert!(cfg.runs_on("ny"));
+        assert!(!cfg.runs_on("jp"));
+        assert!(!cfg.runs_on(""));
+    }
+
+    #[test]
+    fn public_status_node_id_ignores_surrounding_space() {
+        let cfg = public_status("  ny  ");
+        assert!(cfg.runs_on("ny"));
+        assert!(cfg.is_enabled());
+    }
+
+    #[test]
+    fn blank_node_id_never_runs_anywhere() {
+        let cfg = public_status("   ");
+        assert!(!cfg.is_enabled());
+        assert!(!cfg.runs_on("   "));
+    }
+
+    #[test]
+    fn danmaku_advert_needs_a_url_that_fits() {
+        let mut cfg = public_status("ny");
+        assert_eq!(cfg.danmaku_advert(), None);
+
+        cfg.public_url = "s.example.com".to_string();
+        assert_eq!(
+            cfg.danmaku_advert().as_deref(),
+            Some("网页详情：s.example.com")
+        );
+        cfg.public_url = "status.detteee.xyz".to_string();
+        assert_eq!(
+            cfg.danmaku_advert().as_deref(),
+            Some("网页详情：status.detteee.xyz")
+        );
+
+        // A quick-tunnel hostname still fits this account's 80-column cap.
+        cfg.public_url = "https://mango-tree-quiet-fox.trycloudflare.com".to_string();
+        assert_eq!(
+            cfg.danmaku_advert().as_deref(),
+            Some("网页详情：https://mango-tree-quiet-fox.trycloudflare.com")
+        );
+
+        // Only a URL that pushes the line past the cap is rejected.
+        cfg.public_url = format!("https://{}", "a".repeat(70));
+        assert_eq!(cfg.danmaku_advert(), None);
+    }
+
+    #[test]
+    fn danmaku_advert_budget_counts_the_prefix() {
+        let mut cfg = public_status("ny");
+        cfg.public_url = "a".repeat(PublicStatusConfig::max_public_url_width());
+        let advert = cfg.danmaku_advert().expect("longest fitting url");
+        assert_eq!(danmaku_width(&advert), DANMAKU_MAX_WIDTH);
+        assert!(cfg.validate().is_ok());
+
+        cfg.public_url = "a".repeat(PublicStatusConfig::max_public_url_width() + 1);
+        assert_eq!(cfg.danmaku_advert(), None);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn the_danmaku_budget_counts_wide_characters_as_two_columns() {
+        assert_eq!(danmaku_width("一"), 2);
+        assert_eq!(danmaku_width("a"), 1);
+        assert!(danmaku_width(&"一".repeat(40)) <= DANMAKU_MAX_WIDTH);
+        assert!(danmaku_width(&"一".repeat(41)) > DANMAKU_MAX_WIDTH);
+        assert!(danmaku_width(&"1".repeat(80)) <= DANMAKU_MAX_WIDTH);
+        assert!(danmaku_width(&"a".repeat(81)) > DANMAKU_MAX_WIDTH);
+
+        // The URL budget is measured the same way: the prefix is 10 columns,
+        // so 35 CJK or 70 ASCII characters fit.
+        let mut cfg = public_status("ny");
+        cfg.public_url = "转".repeat(35);
+        assert!(cfg.danmaku_advert().is_some());
+        cfg.public_url = "转".repeat(36);
+        assert_eq!(cfg.danmaku_advert(), None);
+    }
+
+    #[test]
+    fn validate_rejects_unusable_settings() {
+        let mut cfg = public_status("ny");
+        cfg.port = 0;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = public_status("ny");
+        cfg.bind = "not-an-address".to_string();
+        assert!(cfg.validate().is_err());
+
+        // Unused and no longer validated, so an old value never blocks saving.
+        let mut cfg = public_status("ny");
+        cfg.holodex_refresh_secs = 1;
+        assert!(cfg.validate().is_ok());
+
+        let mut cfg = public_status("ny");
+        cfg.public_url = format!("https://{}", "a".repeat(70));
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_an_explicit_public_bind() {
+        let mut cfg = public_status("ny");
+        cfg.bind = "0.0.0.0".to_string();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn cluster_config_without_public_status_still_loads() {
+        let cluster: ClusterConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert_eq!(cluster.public_status, PublicStatusConfig::default());
+        assert!(!cluster.public_status.is_enabled());
+    }
+
+    #[test]
+    fn channel_deserializes_niconico_platform_and_restream_name() {
+        let channel: Channel = serde_json::from_str(
+            r#"{
+                "name": "ぶいすぽっ!【公式】",
+                "niconico_name": "ぶいすぽ激ロー",
+                "aliases": ["vspo"],
+                "platforms": {
+                    "youtube": "UCuI5XaO-6VkOEhHao6ij7JA",
+                    "niconico": "vspo"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(channel.name, "ぶいすぽっ!【公式】");
+        assert_eq!(channel.niconico_name.as_deref(), Some("ぶいすぽ激ロー"));
+        assert_eq!(channel.platforms.niconico.as_deref(), Some("vspo"));
+        assert_eq!(
+            channel.platforms.youtube.as_deref(),
+            Some("UCuI5XaO-6VkOEhHao6ij7JA")
+        );
+    }
+
+    #[test]
+    fn atomic_write_replaces_target_without_leftover_tmp() {
+        let dir = std::env::temp_dir().join(format!(
+            "bilistream-config-write-test-{}-{}",
+            std::process::id(),
+            CONFIG_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        write_file_atomic(&path, br#"{"old":true}"#).unwrap();
+        write_file_atomic(&path, br#"{"new":true}"#).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"new":true}"#);
+        let entries = fs::read_dir(&dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path(), path);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

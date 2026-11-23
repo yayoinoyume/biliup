@@ -95,8 +95,15 @@ async fn relay_health_is_ready_behind_optional_auth() {
     assert!(body.contains("\"enabled\":true"), "{body}");
     assert!(body.contains("\"sqlite_driver\":\"rusqlite/bundled\""), "{body}");
     assert!(
-        open_dir.path().join("data/relay/relay.sqlite3").exists(),
-        "data/relay 下应生成探活用的 SQLite 文件"
+        open_dir.path().join("data/relay/relay.db").exists(),
+        "data/relay 下应生成加密库文件"
+    );
+    assert!(
+        !std::fs::read_dir(open_dir.path().join("data/relay"))
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".key")),
+        "密钥文件不得写进数据目录"
     );
     stop_and_assert_released(port, stop, task).await;
 

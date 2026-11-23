@@ -1,0 +1,230 @@
+//! The subprocess boundary: how bilistream runs external tools.
+//!
+//! Every external command (yt-dlp, ffmpeg, streamlink, renice) goes through here
+//! so that three properties hold in one place: a deadline, a bounded output
+//! buffer, and a supervisor that reaps the child even when the caller's future
+//! is dropped. Windows hides the console window from the same module.
+//!
+//! Cancellation is a signal, not dropping the supervisor: a caller that owns
+//! temporary files must await the result before removing them.
+
+use std::future::Future;
+use std::io;
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::sync::Semaphore;
+
+const MAX_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
+static PROCESS_SLOTS: Semaphore = Semaphore::const_new(4);
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+pub fn executable_command(windows_name: &str, default_name: &str) -> String {
+    if cfg!(target_os = "windows") {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let local_exe = exe_dir.join(windows_name);
+                if local_exe.exists() {
+                    return local_exe.to_string_lossy().to_string();
+                }
+            }
+        }
+        windows_name.to_string()
+    } else {
+        default_name.to_string()
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn configure_no_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn configure_no_window(_cmd: &mut Command) {}
+
+#[cfg(target_os = "windows")]
+pub fn configure_tokio_no_window(cmd: &mut tokio::process::Command) {
+    cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn configure_tokio_no_window(_cmd: &mut tokio::process::Command) {}
+
+async fn read_limited(reader: impl AsyncRead + Unpin) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_OUTPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() as u64 > MAX_OUTPUT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "subprocess output limit exceeded",
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Drain both pipes concurrently with exit, including queueing in the deadline.
+/// A detached supervisor reaps the child even if the caller drops its future.
+pub async fn command_output_with_timeout(
+    command: Command,
+    limit: Duration,
+    label: &str,
+) -> io::Result<Output> {
+    let deadline = tokio::time::Instant::now() + limit;
+    let label = label.to_owned();
+    let (mut sender, receiver) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result =
+            command_output_cancellable(command, deadline, &label, sender.closed(), None).await;
+        let _ = sender.send(result);
+    });
+    receiver
+        .await
+        .map_err(|_| io::Error::other("subprocess supervisor stopped"))?
+}
+
+/// Caller owns temporary resources and must await this before removing them.
+/// Cancellation is a signal, not dropping the owning supervisor future.
+pub(crate) async fn command_output_cancellable(
+    command: Command,
+    deadline: tokio::time::Instant,
+    label: &str,
+    cancelled: impl Future<Output = ()>,
+    pid_file: Option<&std::path::Path>,
+) -> io::Result<Output> {
+    let timed_out = || io::Error::new(io::ErrorKind::TimedOut, format!("{label} timed out"));
+    let interrupted = || io::Error::new(io::ErrorKind::Interrupted, "subprocess cancelled");
+    tokio::pin!(cancelled);
+    let _permit = tokio::select! {
+        biased;
+        _ = &mut cancelled => return Err(interrupted()),
+        result = tokio::time::timeout_at(deadline, PROCESS_SLOTS.acquire()) => {
+            result.map_err(|_| timed_out())?.map_err(io::Error::other)?
+        }
+    };
+    let mut command = tokio::process::Command::from(command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    if let (Some(path), Some(pid)) = (pid_file, child.id()) {
+        if let Err(error) = crate::storage::paths::write_private(path, pid.to_string().as_bytes()) {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("stdout pipe missing"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("stderr pipe missing"))?;
+    let result = tokio::select! {
+        biased;
+        _ = &mut cancelled => Err(interrupted()),
+        result = tokio::time::timeout_at(deadline, async {
+        let (status, stdout, stderr) =
+            tokio::try_join!(child.wait(), read_limited(stdout), read_limited(stderr))?;
+        Ok::<_, io::Error>(Output {
+            status,
+            stdout,
+            stderr,
+        })
+        }) => result.unwrap_or_else(|_| Err(timed_out())),
+    };
+    let error = match result {
+        Ok(output) => return Ok(output),
+        Err(error) => error,
+    };
+    // The supervisor owns this child until reap, including caller cancellation.
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    Err(error)
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+
+    fn fixture(mode: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "plugins::subprocess::process_tests::subprocess_fixture",
+            "--nocapture",
+        ]);
+        command.env("BILISTREAM_PROCESS_TEST", mode);
+        command
+    }
+
+    // Run in a child test process, so tests do not depend on Python or a shell.
+    #[test]
+    fn subprocess_fixture() {
+        use std::io::Write;
+        match std::env::var("BILISTREAM_PROCESS_TEST").as_deref() {
+            Ok("verbose") => {
+                std::io::stdout()
+                    .write_all(&vec![b'x'; 1024 * 1024])
+                    .unwrap();
+                std::io::stderr()
+                    .write_all(&vec![b'y'; 1024 * 1024])
+                    .unwrap();
+            }
+            Ok("oversize") => {
+                let block = [b'x'; 8192];
+                for _ in 0..=MAX_OUTPUT_BYTES / block.len() as u64 {
+                    if std::io::stdout().write_all(&block).is_err() {
+                        break;
+                    }
+                }
+            }
+            Ok("sleep") => std::thread::sleep(Duration::from_secs(30)),
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn drains_both_pipes_larger_than_os_buffers() {
+        let output =
+            command_output_with_timeout(fixture("verbose"), Duration::from_secs(10), "fixture")
+                .await
+                .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.iter().filter(|&&b| b == b'x').count() >= 1024 * 1024);
+        assert_eq!(output.stderr, vec![b'y'; 1024 * 1024]);
+    }
+
+    #[tokio::test]
+    async fn rejects_excessive_output() {
+        let error =
+            command_output_with_timeout(fixture("oversize"), Duration::from_secs(10), "fixture")
+                .await
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn enforces_deadline_without_blocking_runtime() {
+        let started = tokio::time::Instant::now();
+        let error =
+            command_output_with_timeout(fixture("sleep"), Duration::from_millis(100), "fixture")
+                .await
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+}

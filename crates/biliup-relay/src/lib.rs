@@ -1,18 +1,32 @@
+#![allow(dead_code)]
+
+pub mod app_state;
+pub mod compat;
+pub mod config;
+pub mod credential_bridge;
+pub mod events;
+pub(crate) mod logging;
+pub mod plugins;
+pub mod storage;
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-pub const DB_FILE: &str = "relay.sqlite3";
+pub use config::{load_config, Config};
+pub use credential_bridge::{
+    load_credentials, RelayBiliAccountSource, RelayBiliCredentials, RelayBiliCredentialsError,
+};
+pub use storage::Store;
+
+pub const DB_FILE: &str = storage::DB_FILE;
 pub const SQLITE_DRIVER: &str = "rusqlite/bundled";
 const STATE_DISABLED: &str = "disabled";
 const STATE_READY: &str = "ready";
 const STATE_STOPPED: &str = "stopped";
-const CREATE_PROBE: &str =
-    "CREATE TABLE IF NOT EXISTS relay_probe (id INTEGER PRIMARY KEY CHECK (id = 1), ticket TEXT NOT NULL)";
-const WRITE_PROBE: &str =
-    "INSERT INTO relay_probe (id, ticket) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET ticket = excluded.ticket";
-const READ_PROBE: &str = "SELECT ticket FROM relay_probe WHERE id = 1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayInitConfig {
@@ -45,17 +59,14 @@ pub enum RelayError {
     #[error("转播数据目录不可用: {0}")]
     DataDir(#[source] std::io::Error),
     #[error("转播存储初始化失败: {0}")]
-    Storage(#[from] rusqlite::Error),
-    #[error("转播存储探活读回不一致")]
-    ProbeMismatch,
+    Storage(#[source] std::io::Error),
 }
 
-#[derive(Debug)]
 struct Inner {
     state: String,
     data_dir: PathBuf,
     ready: bool,
-    storage: Option<rusqlite::Connection>,
+    storage: Option<Arc<Store>>,
 }
 
 impl Inner {
@@ -91,19 +102,12 @@ impl RelayService {
             return Ok(());
         }
         std::fs::create_dir_all(&cfg.data_dir).map_err(RelayError::DataDir)?;
-        let connection = rusqlite::Connection::open(cfg.data_dir.join(DB_FILE))?;
-        connection.execute_batch(CREATE_PROBE)?;
-        let ticket = probe_ticket();
-        connection.execute(WRITE_PROBE, [&ticket])?;
-        let read: String = connection.query_row(READ_PROBE, [], |row| row.get(0))?;
-        if read != ticket {
-            return Err(RelayError::ProbeMismatch);
-        }
+        let store = storage::init(&cfg.data_dir, cfg.key_file.as_deref()).map_err(RelayError::Storage)?;
         let mut inner = lock(&self.inner);
         inner.state = String::from(STATE_READY);
         inner.data_dir = cfg.data_dir;
         inner.ready = true;
-        inner.storage = Some(connection);
+        inner.storage = Some(store);
         Ok(())
     }
 
@@ -135,13 +139,6 @@ pub fn install_crypto_provider() {
 
 fn lock(inner: &Mutex<Inner>) -> std::sync::MutexGuard<'_, Inner> {
     inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn probe_ticket() -> String {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(elapsed) => format!("{}-{}", elapsed.as_secs(), elapsed.subsec_nanos()),
-        Err(_) => String::from("0-0"),
-    }
 }
 
 #[cfg(test)]
@@ -178,7 +175,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_probes_sqlite_and_shutdown_is_idempotent() {
+    async fn start_opens_the_encrypted_store_and_shutdown_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let relay = RelayService::new();
         let cfg = RelayInitConfig {
@@ -193,13 +190,31 @@ mod tests {
         assert!(health.enabled);
         assert!(health.storage_ready);
         assert_eq!(health.data_dir, cfg.data_dir.display().to_string());
-        assert!(cfg.data_dir.join(DB_FILE).exists());
 
-        let probe = rusqlite::Connection::open(cfg.data_dir.join(DB_FILE)).unwrap();
-        let rows: i64 = probe
-            .query_row("SELECT COUNT(*) FROM relay_probe", [], |row| row.get(0))
+        let database = cfg.data_dir.join(DB_FILE);
+        assert!(database.exists(), "加密库应落在 data 目录内");
+        assert!(
+            !cfg.data_dir
+                .read_dir()
+                .unwrap()
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().ends_with(".key")),
+            "密钥文件不得写进数据目录"
+        );
+
+        let probe = rusqlite::Connection::open(&database).unwrap();
+        let documents: i64 = probe
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(rows, 1);
+        assert_eq!(documents, 1, "新建库应写入空的过滤词文档");
+        let encrypted: i64 = probe
+            .query_row(
+                "SELECT encrypted FROM documents WHERE name='invalid_words.txt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(encrypted, 0, "非敏感文档以明文存储");
         drop(probe);
 
         relay.start(cfg).await.expect("重复启动应幂等");
