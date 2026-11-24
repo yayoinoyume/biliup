@@ -18,6 +18,55 @@ pub fn parse_bind(input: &str) -> Result<IpAddr, String> {
         .map_err(|e| format!("invalid bind address '{input}': {e}"))
 }
 
+pub mod api {
+    //! 阶段替换：待 Phase 2 迁入 webui/api/status.rs 后由真实实现替换。
+    //!
+    //! 数据已经是真的：直接读 plugins::ffmpeg 的实时指标，不写死常量。
+
+    use super::state::NetworkStatus;
+
+    /// 本地推流器的实时网络指标快照；没有本地推流时返回空快照。
+    pub(crate) async fn current_network_status() -> NetworkStatus {
+        // A live room may be fed by another node. Zero progress is also valid for
+        // a stalled local publisher, so metrics alone cannot indicate ownership.
+        if !crate::plugins::is_ffmpeg_running().await {
+            return NetworkStatus::default();
+        }
+        let hls_cache_active = crate::plugins::is_ffmpeg_hls_cache_active();
+        let network_stats = crate::plugins::get_ffmpeg_network_stats();
+        NetworkStatus {
+            ffmpeg_running: true,
+            stream_speed: crate::plugins::get_ffmpeg_speed(),
+            stream_cache_speed: if hls_cache_active {
+                crate::plugins::get_ffmpeg_cache_speed()
+            } else {
+                None
+            },
+            stream_bitrate_kbps: network_stats.push_bitrate_kbps,
+            stream_cache_bitrate_kbps: if hls_cache_active {
+                network_stats.cache_bitrate_kbps
+            } else {
+                None
+            },
+            stream_fps: network_stats.push_fps,
+            stream_frame: network_stats.push_frame,
+            stream_time_secs: network_stats.push_time_secs,
+            stream_cache_time_secs: if hls_cache_active {
+                network_stats.cache_time_secs
+            } else {
+                None
+            },
+            hls_cache_active,
+            stream_bitrate_history: network_stats.push_bitrate_history,
+            stream_cache_bitrate_history: if hls_cache_active {
+                network_stats.cache_bitrate_history
+            } else {
+                Vec::new()
+            },
+        }
+    }
+}
+
 pub mod events {
     /// 状态缓存变化事件名。
     pub const STATUS: &str = "status";
@@ -30,6 +79,26 @@ pub mod events {
 
 pub mod state {
     use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+    pub struct NetworkStatus {
+        #[serde(default)]
+        pub ffmpeg_running: bool,
+        pub stream_speed: Option<f32>,
+        pub stream_cache_speed: Option<f32>,
+        pub stream_bitrate_kbps: Option<f32>,
+        pub stream_cache_bitrate_kbps: Option<f32>,
+        pub stream_fps: Option<f32>,
+        pub stream_frame: Option<u64>,
+        pub stream_time_secs: Option<u32>,
+        pub stream_cache_time_secs: Option<u32>,
+        pub hls_cache_active: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub stream_bitrate_history: Vec<f32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub stream_cache_bitrate_history: Vec<f32>,
+    }
 
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct StatusData {

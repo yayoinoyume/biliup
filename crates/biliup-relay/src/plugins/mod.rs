@@ -1,4 +1,4 @@
-//! 通用插件：A 组基础能力 + B 组 B 站直播控制与弹幕客户端 + C 组多平台源检测与发现。
+//! 通用插件：A 组基础能力 + B 组 B 站直播控制与弹幕客户端 + C 组多平台源检测与发现 + D 组推流引擎。
 
 pub mod banned_keywords;
 pub mod bilibili;
@@ -13,6 +13,7 @@ pub(crate) mod mask_pairing;
 pub mod niconico;
 pub mod niconico_live;
 pub(crate) mod niconico_session;
+pub mod priority;
 pub mod riot;
 pub(crate) mod source_status;
 pub(crate) mod stream_item;
@@ -37,6 +38,7 @@ pub use danmaku_client::*;
 pub use ffmpeg::*;
 pub use holodex::*;
 pub use niconico::*;
+pub use priority::*;
 pub use riot::*;
 pub use stream_item::*;
 pub use twitch::*;
