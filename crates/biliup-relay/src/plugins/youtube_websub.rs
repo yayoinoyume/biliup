@@ -1107,33 +1107,64 @@ mod tests {
         assert!(bucket.take(now + Duration::from_millis(100)));
     }
 
+    async fn port_taken(port: u16) -> bool {
+        match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
+            Ok(listener) => {
+                drop(listener);
+                false
+            }
+            Err(e) => {
+                assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::AddrInUse,
+                    "端口探针遇到意外错误：{e}"
+                );
+                true
+            }
+        }
+    }
+
     #[tokio::test]
     async fn listener_retries_after_bind_failure_and_finished_task() {
-        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = occupied.local_addr().unwrap().port();
-        let mut worker = Worker::default();
-        assert!(!worker.reconcile_listener(port).await);
-        assert!(worker.listener.is_none());
-        assert!(!healthy());
-        drop(occupied);
-        assert!(worker.reconcile_listener(port).await);
-        let listener = worker.listener.as_mut().unwrap();
-        listener.task.abort();
-        while !listener.task.is_finished() {
-            tokio::task::yield_now().await;
+        for _ in 0..8 {
+            let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = occupied.local_addr().unwrap().port();
+            let mut worker = Worker::default();
+            assert!(!worker.reconcile_listener(port).await);
+            assert!(worker.listener.is_none());
+            assert!(!healthy());
+            drop(occupied);
+            if !worker.reconcile_listener(port).await {
+                assert!(
+                    port_taken(port).await,
+                    "端口 {port} 空闲但 reconcile_listener 返回 false"
+                );
+                continue;
+            }
+            let listener = worker.listener.as_mut().unwrap();
+            listener.task.abort();
+            while !listener.task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            if !worker.reconcile_listener(port).await {
+                assert!(
+                    port_taken(port).await,
+                    "端口 {port} 空闲但 reconcile_listener 未能替换死任务"
+                );
+                continue;
+            }
+            assert!(!worker.listener.as_ref().unwrap().task.is_finished());
+            let task = worker.listener.as_ref().unwrap().task.abort_handle();
+            drop(worker);
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            if port_taken(port).await {
+                continue;
+            }
+            return;
         }
-        assert!(worker.reconcile_listener(port).await);
-        assert!(!worker.listener.as_ref().unwrap().task.is_finished());
-        let task = worker.listener.as_ref().unwrap().task.abort_handle();
-        drop(worker);
-        while !task.is_finished() {
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            tokio::net::TcpListener::bind((std::net::Ipv4Addr::new(127, 0, 0, 1), port))
-                .await
-                .is_ok()
-        );
+        panic!("8 轮重试后临时端口仍被并发测试占用，监听验证未完成");
     }
 
     #[tokio::test]
