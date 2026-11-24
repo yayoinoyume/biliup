@@ -116,6 +116,9 @@ static EVENT_RX: Mutex<Option<Receiver<Arc<Event>>>> = Mutex::new(None);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Bounded wait for the writer thread to leave during shutdown.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Serializes start(): the bus consumer may be taken or registered once, and
+/// the handle must be installed by the same caller that took it.
+static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static SEQ: AtomicU64 = AtomicU64::new(0);
 /// Seq of the open relay session (0 = none), read by the sampler.
 static OPEN_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -239,6 +242,7 @@ fn secrets_of(cfg: &crate::config::Config) -> Vec<String> {
 /// The consumer is registered even when no config exists yet and its receiver
 /// is parked, because the bus registry can only be joined before the seal.
 pub async fn start() {
+    let _serial = START_LOCK.lock().await;
     if handle_lock().is_some() {
         return;
     }
@@ -276,16 +280,16 @@ pub async fn start() {
         stopping: AtomicBool::new(false),
     });
     let (control, control_rx) = mpsc::channel(1);
-    ACTIVE.store(shared.enabled, Ordering::Release);
     {
         let mut slot = handle_lock();
         if slot.is_some() {
-            // A concurrent start won; this caller never opened the database.
-            ACTIVE.store(false, Ordering::Release);
+            // Defensive: START_LOCK already makes this unreachable, and the
+            // installed handle owns ACTIVE.
             drop(slot);
             park_event_receiver(rx);
             return;
         }
+        ACTIVE.store(shared.enabled, Ordering::Release);
         *slot = Some(Handle {
             shared: Arc::clone(&shared),
             control,
