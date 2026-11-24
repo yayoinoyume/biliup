@@ -320,3 +320,120 @@ pub mod writer {
     }
 }
 
+
+static SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// YouTube video id、Twitch stream id 或 Niconico 节目 id；URL、空白、凭据一律丢弃。
+pub(crate) fn source_stream_id(raw: &str) -> Option<String> {
+    let id = raw.trim();
+    if id.is_empty()
+        || id.chars().count() > 80
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// 一次转播会话（设计 5.4）。`finish` 记录结束原因；未结束就 drop 记 `aborted`。
+///
+/// 待 Phase 2 迁入 history.sqlite 完整替换：本阶段只把事实发到事件总线，
+/// 不落库、不维护会话序号表。
+pub struct SessionGuard {
+    seq: u64,
+    done: bool,
+}
+
+impl SessionGuard {
+    pub fn start(
+        cfg: &crate::config::Config,
+        platform: &str,
+        channel_id: &str,
+        channel_name: &str,
+        title: Option<&str>,
+    ) -> Self {
+        Self::start_with_area(cfg, platform, channel_id, channel_name, title, None, None)
+    }
+
+    pub fn start_with_area(
+        cfg: &crate::config::Config,
+        platform: &str,
+        channel_id: &str,
+        channel_name: &str,
+        title: Option<&str>,
+        area_v2: Option<u64>,
+        source_id: Option<&str>,
+    ) -> Self {
+        let seq = SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let room = cfg.bililive.room.max(0) as u64;
+        let platform: &'static str = match platform {
+            "TW" => "TW",
+            "NC" => "NC",
+            _ => "YT",
+        };
+        emit(EventKind::SessionStarted {
+            seq,
+            platform,
+            channel_id: crate::logging::safe_text(channel_id, 80),
+            channel_name: crate::logging::safe_text(channel_name, 80),
+            title: title.map(|title| crate::logging::safe_text(title, 160)),
+            live_key: None,
+            source_id: source_id.and_then(source_stream_id),
+            area_v2,
+            room,
+        });
+        Self { seq, done: false }
+    }
+
+    pub fn run_started(&self, run: u64) {
+        emit(EventKind::FfmpegStarted { seq: self.seq, run });
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    pub fn run_exited_with_diagnostic_at(
+        &self,
+        at: u64,
+        run: u64,
+        code: Option<i32>,
+        success: bool,
+        counted_failure: bool,
+        diagnostic: Option<&str>,
+    ) {
+        emit_at(
+            at,
+            EventKind::FfmpegExited {
+                seq: self.seq,
+                run,
+                code,
+                success,
+                counted_failure,
+                diagnostic: diagnostic.map(|text| crate::logging::safe_text(text, 100)),
+            },
+        );
+    }
+
+    pub fn finish(mut self, reason: EndReason) {
+        self.end(reason);
+    }
+
+    fn end(&mut self, reason: EndReason) {
+        if !self.done {
+            self.done = true;
+            emit(EventKind::SessionEnded {
+                seq: self.seq,
+                reason,
+            });
+        }
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.end(EndReason::Aborted);
+    }
+}

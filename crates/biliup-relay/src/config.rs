@@ -1089,7 +1089,7 @@ async fn save_config_inner(
             source_keys: config_source_keys(),
         }));
         invalidate_config_cache();
-        crate::compat::priority::clear_prefetched_playable_stream();
+        crate::plugins::priority::clear_prefetched_playable_stream();
         crate::compat::webui::events::publish(crate::compat::webui::events::CONFIG);
         crate::compat::webui::stream_list::wake();
         crate::compat::webui::state::request_status_refresh();

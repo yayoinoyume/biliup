@@ -5,6 +5,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::Config;
 use crate::plugins::stream_item::StreamItem;
 use crate::plugins::youtube_data::YtVideo;
@@ -45,9 +47,34 @@ pub fn peer_exempt_cooldowns_hit(
     false
 }
 
-/// 待 Phase 2 监控配置版本迁入后替换：单机没有需要同步的版本。
-pub fn monitored_config_version(_config: &Config) -> String {
-    String::new()
+/// 监控相关字段的归一化哈希；与源仓库 cluster/version.rs 的 payload 逐字段一致，
+/// 因此同一份监控配置在两个阶段之间会得到相同的版本号。
+pub fn monitored_config_version(config: &Config) -> String {
+    let value = serde_json::json!({
+        "youtube": {
+            "channel_name": config.youtube.channel_name,
+            "channel_id": config.youtube.channel_id,
+        },
+        "twitch": {
+            "channel_name": config.twitch.channel_name,
+            "channel_id": config.twitch.channel_id,
+        },
+        "priority_channel": {
+            "channel_name": config.priority_channel.channel_name,
+            "youtube_channel_id": config.priority_channel.youtube_channel_id,
+            "twitch_channel_id": config.priority_channel.twitch_channel_id,
+            "default_area": config.priority_channel.default_area,
+        },
+        "niconico": {
+            "channel_name": config.niconico.channel_name,
+            "channel_id": config.niconico.channel_id,
+            "live_id": config.niconico.live_id,
+            "area_v2": config.niconico.area_v2,
+        },
+        "channels_json": read_json_file("channels.json"),
+        "areas_json": read_json_file("areas.json"),
+    });
+    canonical_value_hash(&value)
 }
 
 /// 待 Phase 2 集群监控配置同步迁入后替换：单机无需同步。
@@ -55,9 +82,38 @@ pub async fn sync_monitored_config_after_change(_config: &Config) -> String {
     String::new()
 }
 
-/// 待 Phase 2 集群所有权判断迁入后替换：单机永远允许本机监控。
-pub fn local_monitoring_allowed(_config: &Config) -> bool {
+/// 单机没有集群：本节点始终可以监控/推流。
+pub fn local_monitoring_allowed(config: &Config) -> bool {
+    local_monitoring_block_reason(config).is_none()
+}
+
+/// 单机没有集群归属：None 表示本节点可以继续监控/推流。
+pub fn local_monitoring_block_reason(_config: &Config) -> Option<String> {
+    None
+}
+
+/// 单机条件始终就绪，立即返回；签名与源仓库一致，供 runtime 统一调用。
+pub async fn wait_for_local_monitoring(_config: &Config) {}
+
+/// 单机不统计失败重启次数。
+pub fn record_stream_exit(_success: bool) {}
+
+/// 单机没有集群所有权：永远允许本机推流。
+pub fn local_may_push(_config: &Config, _stream: Option<ClusterStreamIdentity>) -> bool {
     true
+}
+
+/// 单机没有集群所有权需要清除。
+pub fn clear_local_stream() {}
+
+/// 源仓库 cluster/types.rs 的流身份；本阶段只出现在所有权判断签名与日志里。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ClusterStreamIdentity {
+    pub platform: String,
+    pub channel_name: String,
+    pub channel_id: String,
+    pub stream_id: Option<String>,
+    pub title: Option<String>,
 }
 
 /// 待 Phase 5 集群 YouTube 索引迁入后替换：本机如何回答 YouTube 问题。
@@ -131,4 +187,60 @@ pub(crate) fn cluster_monitored_channels(cfg: &Config) -> HashSet<String> {
 /// 待 Phase 5 集群 WebSub 归属迁入后替换：单机没有集群归属，订阅边界始终放行。
 pub(crate) fn may_subscribe_websub(_cfg: &Config) -> bool {
     true
+}
+
+/// 待 Phase 2 集群状态库迁入后替换：版本哈希只覆盖真正的共享监控字段，
+/// 与源仓库 cluster/version.rs 的 monitored_sync_value_from_config 同形。
+fn read_json_file(name: &str) -> Option<serde_json::Value> {
+    crate::storage::read_document(name).ok()
+}
+
+fn canonical_value_hash(value: &serde_json::Value) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    canonical_json(value).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    let mut output = String::new();
+    write_canonical_json(value, &mut output);
+    output
+}
+
+fn write_canonical_json(value: &serde_json::Value, output: &mut String) {
+    match value {
+        serde_json::Value::Null => output.push_str("null"),
+        serde_json::Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        serde_json::Value::Number(value) => output.push_str(&value.to_string()),
+        serde_json::Value::String(value) => {
+            output.push_str(&serde_json::to_string(value).unwrap_or_default());
+        }
+        serde_json::Value::Array(values) => {
+            output.push('[');
+            for (index, item) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_canonical_json(item, output);
+            }
+            output.push(']');
+        }
+        serde_json::Value::Object(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort();
+            output.push('{');
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                output.push_str(&serde_json::to_string(key).unwrap_or_default());
+                output.push(':');
+                write_canonical_json(&map[key], output);
+            }
+            output.push('}');
+        }
+    }
 }

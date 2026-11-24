@@ -2,12 +2,13 @@ pub mod app_state;
 pub mod compat;
 // 阶段替换：C/D 组插件仍按源仓库的 crate::cluster / crate::history / crate::webui 路径引用，
 // 这里先指向 compat 薄适配层，Phase 2/5 真实模块迁入后改为直接声明。
-pub(crate) use compat::{cluster, history, webui};
+pub(crate) use compat::{cluster, history, notify, webui};
 pub mod config;
 pub mod credential_bridge;
 pub mod events;
 pub(crate) mod logging;
 pub mod plugins;
+pub mod runtime;
 pub mod storage;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -22,6 +23,10 @@ pub use credential_bridge::{
     load_credentials, RelayBiliAccountSource, RelayBiliCredentials, RelayBiliCredentialsError,
 };
 pub use storage::Store;
+pub use compat::webui::state::{
+    update_status_cache, BiliStatus, NicoStatus, PriorityChannelStatus, StatusData, TwStatus,
+    YtStatus,
+};
 
 pub const DB_FILE: &str = storage::DB_FILE;
 pub const SQLITE_DRIVER: &str = "rusqlite/bundled";
@@ -63,11 +68,18 @@ pub enum RelayError {
     Storage(#[source] std::io::Error),
 }
 
+/// 一个托管在单线程运行时线程上的监控循环；`stop` 通知退出，`task` 等它结束。
+struct Monitor {
+    stop: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
 struct Inner {
     state: String,
     data_dir: PathBuf,
     ready: bool,
     storage: Option<Arc<Store>>,
+    monitor: Option<Monitor>,
 }
 
 impl Inner {
@@ -77,6 +89,7 @@ impl Inner {
             data_dir: PathBuf::new(),
             ready: false,
             storage: None,
+            monitor: None,
         }
     }
 }
@@ -123,12 +136,65 @@ impl RelayService {
         }
     }
 
+    /// 显式启动监控循环：默认 start 不发起任何外部网络轮询，由 Phase 2 启动控制 API 调用。
+    ///
+    /// 监控循环内部带着非 Send 的错误值，因此独占一条单线程运行时线程托管，
+    /// 与源仓库 launch.rs 的处理方式一致；停止通过 watch 通道通知。
+    pub fn spawn_monitor_loop(&self, ffmpeg_log_level: &'static str) {
+        let mut inner = lock(&self.inner);
+        if inner.monitor.is_some() {
+            return;
+        }
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let task = tokio::task::spawn_blocking(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!("监控循环运行时创建失败：{error}");
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                tokio::select! {
+                    _ = stopped.changed() => {}
+                    outcome = runtime::run_bilistream(ffmpeg_log_level) => {
+                        if let Err(error) = outcome {
+                            tracing::warn!("转播监控循环退出：{error}");
+                        }
+                    }
+                }
+            });
+        });
+        inner.monitor = Some(Monitor { stop, task });
+    }
+
+    /// 通知并等待监控循环停止；返回是否真的有一个监控循环被停下。
+    pub async fn stop_monitor_loop(&self) -> bool {
+        let monitor = lock(&self.inner).monitor.take();
+        let Some(monitor) = monitor else {
+            return false;
+        };
+        let _ = monitor.stop.send(true);
+        let _ = monitor.task.await;
+        true
+    }
+
+    /// 优雅停机：先停监控循环，再停该循环启动的弹幕与推流，最后释放存储句柄，
+    /// 保证同进程 start -> shutdown -> start 可干净重启且不泄漏句柄。
+    ///
+    /// 弹幕与推流是进程级单例，只在本服务确实启动过监控循环时才停它们，
+    /// 避免同进程里误停不是自己发起的引擎。
     pub async fn shutdown(&self) {
+        let monitored = self.stop_monitor_loop().await;
+        if monitored {
+            plugins::stop_danmaku().await;
+            runtime::graceful_shutdown().await;
+        }
         let held = {
             let mut inner = lock(&self.inner);
-            if inner.storage.is_none() && inner.state == STATE_STOPPED {
-                return;
-            }
             let held = inner.storage.take().is_some();
             inner.ready = false;
             inner.state = String::from(STATE_STOPPED);

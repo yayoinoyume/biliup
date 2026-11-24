@@ -3,6 +3,8 @@ mod crypto;
 mod documents;
 pub mod paths;
 
+pub(crate) use documents::reject_legacy_channels;
+
 use crypto::Key;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
