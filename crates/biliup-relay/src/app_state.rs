@@ -165,8 +165,8 @@ impl AppState {
 
     pub fn publish(&self, kind: &'static str) {
         let _ = self.inner.events.send(kind);
-        // STATUS 由本类型生产（update_status_cache* 内部调用），而 P2-03 的 SSE
-        // 只订阅 ui_events：这里转发一次，否则状态事件到不了新总线。
+        // inner.events 驱动 P2-03 起的面板 SSE 订阅者；ui_events 是给 Phase 1/2
+        // 遗留订阅者复用的进程级广播总线，因此这里两条总线都要发一次。
         crate::ui_events::publish(kind);
     }
 

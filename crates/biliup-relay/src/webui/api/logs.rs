@@ -14,6 +14,11 @@ use crate::app_state::AppState;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const PROBE_POLL: Duration = Duration::from_millis(10);
 
+/// 每个工具只认自己的版本开关：ffmpeg 用单横线，yt-dlp / streamlink 用双横线。
+/// ffmpeg 对 `--version` 返回退出码 8，用错就会永远判为不可用。
+const FFMPEG_VERSION_ARGS: &[&str] = &["-version"];
+const TOOL_VERSION_ARGS: &[&str] = &["--version"];
+
 #[derive(Serialize)]
 pub struct LogsResponse {
     success: bool,
@@ -54,9 +59,9 @@ pub struct DepsStatus {
 
 /// 在期限内以 0 退出的才算可用。超时或等待失败一律杀掉并 `wait` 回收，
 /// 绝不在宿主里留下僵尸进程，结果按不可用处理。
-fn probe_with(program: &Path, timeout: Duration) -> bool {
+fn probe_with(program: &Path, args: &[&str], timeout: Duration) -> bool {
     let Ok(mut child) = Command::new(program)
-        .arg("--version")
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -69,7 +74,13 @@ fn probe_with(program: &Path, timeout: Duration) -> bool {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(PROBE_POLL),
-            _ => {
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Err(error) => {
+                tracing::debug!("依赖探测等待失败：{error}");
                 let _ = child.kill();
                 let _ = child.wait();
                 return false;
@@ -78,20 +89,28 @@ fn probe_with(program: &Path, timeout: Duration) -> bool {
     }
 }
 
-fn probe(program: &Path) -> bool {
-    probe_with(program, PROBE_TIMEOUT)
+fn probe(program: &Path, args: &[&str]) -> bool {
+    probe_with(program, args, PROBE_TIMEOUT)
 }
 
-fn deps_status() -> DepsStatus {
-    let ffmpeg = probe(Path::new("ffmpeg"));
-    let yt_dlp = probe(Path::new("yt-dlp"));
-    let streamlink = probe(Path::new("streamlink"));
+fn deps_status_with(ffmpeg: &Path, yt_dlp: &Path, streamlink: &Path) -> DepsStatus {
+    let ffmpeg = probe(ffmpeg, FFMPEG_VERSION_ARGS);
+    let yt_dlp = probe(yt_dlp, TOOL_VERSION_ARGS);
+    let streamlink = probe(streamlink, TOOL_VERSION_ARGS);
     DepsStatus {
         ffmpeg,
         yt_dlp,
         streamlink,
         ready: ffmpeg && (yt_dlp || streamlink),
     }
+}
+
+fn deps_status() -> DepsStatus {
+    deps_status_with(
+        Path::new("ffmpeg"),
+        Path::new("yt-dlp"),
+        Path::new("streamlink"),
+    )
 }
 
 pub async fn get_deps_status() -> Json<DepsStatus> {
@@ -102,6 +121,23 @@ pub async fn get_deps_status() -> Json<DepsStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn on_path(name: &str) -> bool {
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
+        })
+    }
 
     #[tokio::test]
     async fn logs_endpoint_returns_the_lines_the_app_state_buffer_holds() {
@@ -145,9 +181,12 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&runnable, std::fs::Permissions::from_mode(0o755)).unwrap();
-            assert!(probe(&runnable), "以 0 退出的脚本必须判为可用");
+            assert!(
+                probe(&runnable, TOOL_VERSION_ARGS),
+                "以 0 退出的脚本必须判为可用"
+            );
         }
-        assert!(!probe(&dir.path().join("missing-tool")));
+        assert!(!probe(&dir.path().join("missing-tool"), TOOL_VERSION_ARGS));
 
         let status = deps_status();
         let wire = serde_json::to_value(&status).unwrap();
@@ -158,28 +197,70 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, vec!["ffmpeg", "ready", "streamlink", "yt_dlp"]);
-        assert_eq!(status.ready, status.ffmpeg && (status.yt_dlp || status.streamlink));
+        assert_eq!(
+            status.ready,
+            status.ffmpeg && (status.yt_dlp || status.streamlink)
+        );
+    }
+
+    /// ffmpeg 只认单横线版本开关：`--version` 会以 8 退出，用错就永远不可用。
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_is_probed_with_its_single_dash_version_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = script(
+            dir.path(),
+            "ffmpeg-fake.sh",
+            "#!/bin/sh\n[ \"$1\" = \"-version\" ] && exit 0\nexit 8\n",
+        );
+        let yt_dlp = script(
+            dir.path(),
+            "yt-dlp-fake.sh",
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 0\nexit 2\n",
+        );
+        let streamlink = dir.path().join("no-streamlink");
+
+        let status = deps_status_with(&ffmpeg, &yt_dlp, &streamlink);
+        assert!(status.ffmpeg, "ffmpeg 必须以 -version 判为可用");
+        assert!(status.yt_dlp, "yt-dlp 必须以 --version 判为可用");
+        assert!(!status.streamlink, "不存在的命令必须判为不可用");
+        assert!(status.ready, "ffmpeg 与 yt-dlp 都可用时 ready 必须为 true");
+    }
+
+    /// 本机装了真实 ffmpeg 时再核对一次真实退出码；没装就跳过（不失败、不 ignore）。
+    #[cfg(unix)]
+    #[test]
+    fn a_real_ffmpeg_on_path_answers_its_single_dash_version_flag() {
+        if !on_path("ffmpeg") {
+            return;
+        }
+        assert!(
+            probe_with(Path::new("ffmpeg"), FFMPEG_VERSION_ARGS, PROBE_TIMEOUT),
+            "真实 ffmpeg 必须能以 -version 探测成功"
+        );
     }
 
     /// 慢命令必须在期限附近返回 false，且子进程被回收（不是僵尸）。
     #[cfg(unix)]
     #[test]
     fn a_slow_probe_times_out_without_leaving_a_zombie() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("child.pid");
-        let slow = dir.path().join("probe-slow.sh");
-        std::fs::write(
-            &slow,
-            format!("#!/bin/sh\necho $$ > '{}'\nsleep 30\n", pid_file.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let slow = script(
+            dir.path(),
+            "probe-slow.sh",
+            &format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+                pid_file.display()
+            ),
+        );
 
         let timeout = Duration::from_millis(300);
         let started = Instant::now();
-        assert!(!probe_with(&slow, timeout), "慢命令必须判为不可用");
+        assert!(
+            !probe_with(&slow, TOOL_VERSION_ARGS, timeout),
+            "慢命令必须判为不可用"
+        );
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(2),
@@ -199,10 +280,12 @@ mod tests {
                 state.is_none_or(|rest| !rest.trim_start().starts_with('Z')),
                 "超时的子进程必须被回收，不得留成僵尸：{stat:?}"
             );
+            assert!(
+                state.is_none_or(|rest| !rest.trim_start().starts_with('S')),
+                "超时后不得留下仍在运行的 `exec sleep` 子进程：{stat:?}"
+            );
         }
-        assert!(
-            std::fs::metadata(format!("/proc/{pid}")).is_err() || cfg!(not(target_os = "linux")),
-            "子进程必须已经退出"
-        );
+        #[cfg(not(target_os = "linux"))]
+        let _ = pid;
     }
 }

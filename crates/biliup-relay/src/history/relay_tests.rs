@@ -286,22 +286,39 @@ async fn a_committed_batch_reaches_the_sse_stream_as_history() {
     let guard = SessionGuard::start(&cfg, "YT", "UC_history_sse", "界面频道", None);
     guard.run_started(10);
 
+    // 先读到结果再收尾，任何 panic 都必须发生在 shutdown 之后，否则会漏下
+    // 统计写入线程与临时库。
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut seen = String::new();
+    let mut failure = None;
     while !seen.contains("event: history") {
-        assert!(
-            Instant::now() < deadline,
-            "SSE 未在期限内收到 history 事件：{seen}"
-        );
+        if Instant::now() >= deadline {
+            failure = Some(format!("SSE 未在期限内收到 history 事件：{seen}"));
+            break;
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, body.next()).await {
             Ok(Some(Ok(chunk))) => seen.push_str(&String::from_utf8_lossy(&chunk)),
-            other => panic!("SSE 流提前结束或读取失败：{other:?}，已收到：{seen}"),
+            Ok(None) => {
+                failure = Some(format!("SSE 流提前结束，已收到：{seen}"));
+                break;
+            }
+            Ok(Some(Err(error))) => {
+                failure = Some(format!("SSE 读取失败：{error}，已收到：{seen}"));
+                break;
+            }
+            Err(_) => {
+                failure = Some(format!("SSE 读取超时，已收到：{seen}"));
+                break;
+            }
         }
     }
     guard.finish(EndReason::UserStop);
     relay.shutdown().await;
     drop(harness);
+    if let Some(failure) = failure {
+        panic!("{failure}");
+    }
 }
 
 #[tokio::test]

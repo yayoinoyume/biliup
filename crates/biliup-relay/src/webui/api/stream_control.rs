@@ -1077,3 +1077,30 @@ mod cover_access_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod monitor_target_tests {
+    use super::monitor_target_reload_needed;
+
+    #[test]
+    fn monitor_target_reload_needed_only_for_enable_or_enabled_channel_change() {
+        assert!(!monitor_target_reload_needed(
+            true, true, "Channel", "Channel", "id", "id",
+        ));
+        assert!(monitor_target_reload_needed(
+            true, false, "Channel", "Channel", "id", "id",
+        ));
+        assert!(monitor_target_reload_needed(
+            false, true, "Channel", "Channel", "id", "id",
+        ));
+        assert!(monitor_target_reload_needed(
+            true, true, "Channel", "Other", "id", "id",
+        ));
+        assert!(monitor_target_reload_needed(
+            true, true, "Channel", "Channel", "id", "other-id",
+        ));
+        assert!(!monitor_target_reload_needed(
+            false, false, "Channel", "Other", "id", "other-id",
+        ));
+    }
+}
