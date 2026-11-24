@@ -428,7 +428,7 @@ pub mod state {
             });
         }
 
-        if crate::plugins::niconico_configured(&cfg.niconico) {
+        if cfg.niconico.enable_monitor && crate::plugins::niconico_configured(&cfg.niconico) {
             let nico_area_name = crate::plugins::area_name_or_unknown(cfg.niconico.area_v2);
             let (nico_channel_id, nico_channel_name) =
                 crate::plugins::niconico_channel_identity(&cfg.niconico);
@@ -587,6 +587,15 @@ mod tests {
         cfg.youtube.enable_monitor = false;
         apply_status_cache_config(&mut status, &cfg);
         assert!(status.youtube.is_none(), "关闭监控的平台不得留在状态缓存里");
+
+        // 已配置但关闭监控：与运行态卡片同一道门，niconico 卡片同样要清掉。
+        cfg.niconico.enable_monitor = false;
+        cfg.niconico.channel_id = "nico-channel".to_string();
+        apply_status_cache_config(&mut status, &cfg);
+        assert!(
+            status.niconico.is_none(),
+            "关闭监控的 niconico 不得留在状态缓存里"
+        );
     }
 
     #[tokio::test]

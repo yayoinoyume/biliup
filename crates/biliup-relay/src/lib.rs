@@ -238,8 +238,7 @@ impl RelayService {
                 Err(error) => {
                     tracing::error!("监控循环运行时创建失败：{error}");
                     // 引擎从未启动，直接标记清理完成，避免宿主重复停机。
-                    thread_pending.store(false, Ordering::SeqCst);
-                    thread_cleaned.store(true, Ordering::SeqCst);
+                    mark_monitor_cleaned(&thread_cleaned, &thread_pending);
                     return;
                 }
             };
@@ -253,10 +252,7 @@ impl RelayService {
                 plugins::stop_danmaku().await;
                 runtime::graceful_shutdown().await;
             });
-            // 先宣告清理完成，再撤销占位：停机侧在占位后总会复查 cleaned，
-            // 这个顺序保证任何交错都收敛到「占位已撤销」，不会永久拒启。
-            thread_cleaned.store(true, Ordering::SeqCst);
-            thread_pending.store(false, Ordering::SeqCst);
+            mark_monitor_cleaned(&thread_cleaned, &thread_pending);
         });
         inner.monitor = Some(Monitor {
             stop,
@@ -398,6 +394,16 @@ pub async fn local_publisher_running() -> bool {
 
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// 监控线程的唯一终态：先宣告清理完成，再撤销占位。
+///
+/// 停机侧在占位后总会复查 `cleaned`，这个顺序保证任何交错都收敛到
+/// 「占位已撤销」，不会永久卡在 `CleanupPending`。正常结束与运行时创建失败
+/// 两条路径共用它，避免顺序漂移。
+fn mark_monitor_cleaned(cleaned: &AtomicBool, pending: &AtomicBool) {
+    cleaned.store(true, Ordering::SeqCst);
+    pending.store(false, Ordering::SeqCst);
 }
 
 /// 只复位发起本次停机的那一代循环的所有权；旧 stop 不能抹掉新 spawn。
@@ -620,14 +626,18 @@ mod tests {
             MonitorStopOutcome::NotRunning
         );
 
+        let (monitor_started, release, task) = gated_monitor();
         assert_eq!(
-            relay.spawn_monitor_loop_with(|| async {}),
+            relay.spawn_monitor_loop_with(task),
             MonitorSpawnOutcome::Started
         );
+        monitor_started.await.expect("监控任务必须进入监控分支");
+        // 旧代确实还在运行时再 spawn 必须被拒，而不是取决于它多快跑完。
         assert_eq!(
             relay.spawn_monitor_loop_with(|| async {}),
             MonitorSpawnOutcome::AlreadyRunning
         );
+        release.send(()).expect("放行监控线程");
         assert_eq!(
             relay
                 .stop_monitor_loop_with_timeout(Duration::from_secs(5))
