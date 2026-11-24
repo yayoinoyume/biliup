@@ -7,13 +7,19 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{ClusterConfig, Config};
 use crate::plugins::stream_item::StreamItem;
 use crate::plugins::youtube_data::YtVideo;
 
 #[derive(Debug, Default)]
 pub struct ClusterState {
     pub local_draining: bool,
+}
+
+/// 待 Phase 3 集群成员生命周期迁入后替换：单机只有独立节点一种状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClusterLifecycle {
+    Standalone,
 }
 
 pub mod membership {
@@ -34,6 +40,11 @@ pub mod membership {
         pub fn initialize(&self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// 待 Phase 3 集群成员关系迁入后替换：单机恒为独立节点。
+    pub fn current_lifecycle() -> crate::compat::cluster::ClusterLifecycle {
+        crate::compat::cluster::ClusterLifecycle::Standalone
     }
 }
 
@@ -311,4 +322,36 @@ pub mod peer_call {
     {
         Err(PeerCallError::Unreachable("单机没有对等节点".to_string()))
     }
+}
+
+/// 待 Phase 3 集群设置围栏迁入后替换：单机没有成员关系，任何编辑都直接接受。
+pub fn fence_cluster_edit(
+    _current: &ClusterConfig,
+    next: ClusterConfig,
+    _lifecycle: ClusterLifecycle,
+) -> Result<ClusterConfig, &'static str> {
+    Ok(next)
+}
+
+/// 待 Phase 3 集群共享设置版本迁入后替换：单机没有对端比较版本。
+pub fn shared_settings_version(_config: &Config) -> String {
+    String::new()
+}
+
+/// 待 Phase 3 集群设置同步迁入后替换：单机没有对端需要下发。
+pub async fn push_cluster_settings_to_peers(_config: &Config) -> Result<(), String> {
+    Ok(())
+}
+
+/// 待 Phase 3 集群监控配置同步迁入后替换：单机没有对端需要下发。
+pub async fn push_monitored_config_to_peers(_config: &Config) -> Result<(), String> {
+    Ok(())
+}
+
+/// 待 Phase 3 集群弹幕命令运行时同步迁入后替换：单机直接改本地开关。
+pub async fn apply_danmaku_command_runtime_state(_enabled: bool) {}
+
+/// 待 Phase 3 集群围栏迁入后替换：单机不发围栏承诺，所以能力表不带该字段。
+pub fn membership_fencing_capability() -> Option<serde_json::Value> {
+    None
 }

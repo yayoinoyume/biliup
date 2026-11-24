@@ -783,7 +783,7 @@ pub async fn toggle_niconico_monitor(
     })
 }
 
-fn monitor_toggle_enable_rejected_response() -> ApiResponse<()> {
+pub(super) fn monitor_toggle_enable_rejected_response() -> ApiResponse<()> {
     ApiResponse {
         success: false,
         data: None,

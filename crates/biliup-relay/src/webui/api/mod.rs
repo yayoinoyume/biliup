@@ -3,11 +3,19 @@
 //! 每个子模块用显式 `use` 声明依赖，不共享 `use super::*` 的隐式命名空间。
 
 pub mod admin_stream_list;
+pub mod config;
+pub mod crop;
 pub mod history;
+pub mod holodex_auth;
 pub mod logs;
+pub mod manage;
+pub mod setup;
+pub mod setup_data;
 pub mod status;
+pub mod storage;
 pub mod stream_control;
 pub mod stream_switch;
+pub mod youtube_api_status;
 
 pub(crate) use status::current_network_status;
 
@@ -278,5 +286,94 @@ mod tests {
         cfg.enable_youtube_monitor = false;
         cfg.enable_twitch_monitor = false;
         cfg
+    }
+
+    #[test]
+    fn websub_settings_accept_only_http_urls_and_real_ports() {
+        use super::config::validate_websub;
+
+        assert!(validate_websub(None, None).is_ok());
+        assert!(validate_websub(Some(""), Some(3151)).is_ok());
+        assert!(validate_websub(Some("https://yt.example.com/websub/youtube"), None).is_ok());
+        assert!(validate_websub(Some("http://1.2.3.4:3151/websub/youtube"), None).is_ok());
+        assert!(validate_websub(Some("ftp://example.com/x"), None).is_err());
+        assert!(validate_websub(Some("example.com/websub"), None).is_err());
+        assert!(validate_websub(None, Some(0)).is_err());
+    }
+
+    #[test]
+    fn qr_images_are_local_svg_and_oversized_payloads_fail() {
+        use base64::Engine as _;
+
+        use super::setup::qr_code_data_url;
+
+        let image = qr_code_data_url("https://example.invalid/login?token=test").unwrap();
+        let encoded = image.strip_prefix("data:image/svg+xml;base64,").unwrap();
+        let svg = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("example.invalid"));
+        assert!(qr_code_data_url(&"x".repeat(10000)).is_err());
+    }
+
+    #[test]
+    fn crop_update_validation_rejects_incomplete_or_zero_size() {
+        use super::crop::{UpdateCropRequest, crop_config_from_update};
+
+        let disabled = UpdateCropRequest {
+            platform: "youtube".to_string(),
+            enabled: false,
+            width: None,
+            height: None,
+            x: None,
+            y: None,
+        };
+        assert!(crop_config_from_update(&disabled).unwrap().is_none());
+
+        let missing = UpdateCropRequest {
+            platform: "youtube".to_string(),
+            enabled: true,
+            width: Some(1920),
+            height: None,
+            x: Some(0),
+            y: Some(0),
+        };
+        assert_eq!(
+            crop_config_from_update(&missing).unwrap_err(),
+            "\u{542f}\u{7528}\u{88c1}\u{526a}\u{65f6}\u{9700}\u{8981}\u{586b}\u{5199}\u{5bbd}\u{9ad8}\u{4e0e}\u{5750}\u{6807}"
+        );
+
+        let zero_width = UpdateCropRequest {
+            platform: "youtube".to_string(),
+            enabled: true,
+            width: Some(0),
+            height: Some(1080),
+            x: Some(0),
+            y: Some(0),
+        };
+        assert_eq!(
+            crop_config_from_update(&zero_width).unwrap_err(),
+            "\u{88c1}\u{526a}\u{5bbd}\u{9ad8}\u{9700}\u{5927}\u{4e8e} 0"
+        );
+
+        let valid = UpdateCropRequest {
+            platform: "youtube".to_string(),
+            enabled: true,
+            width: Some(1280),
+            height: Some(720),
+            x: Some(10),
+            y: Some(20),
+        };
+        let crop = crop_config_from_update(&valid)
+            .unwrap()
+            .expect("valid crop should be returned");
+        assert_eq!(crop.width, 1280);
+        assert_eq!(crop.height, 720);
+        assert_eq!(crop.x, 10);
+        assert_eq!(crop.y, 20);
     }
 }
