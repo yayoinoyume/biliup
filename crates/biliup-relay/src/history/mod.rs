@@ -767,7 +767,7 @@ pub(crate) fn run_writer(
             }
             // SSE `history` hint, at most one per 5 s.
             if publish && pending_pub && t >= last_pub + 5 {
-                crate::ui_events::publish(crate::ui_events::HISTORY);
+                crate::webui::events::publish(crate::webui::events::HISTORY);
                 last_pub = t;
                 pending_pub = false;
             }

@@ -263,6 +263,47 @@ async fn a_committed_batch_publishes_the_history_ui_event() {
     drop(harness);
 }
 
+/// 真实写入路径必须一路走到 SSE：写入线程 -> 事件总线 -> SSE 流。
+#[tokio::test]
+async fn a_committed_batch_reaches_the_sse_stream_as_history() {
+    use axum::response::IntoResponse;
+    use futures_util::StreamExt;
+
+    let _store = storage::lock_test_global();
+    let (harness, relay) = boot(700_012).await;
+    let state = crate::app_state::AppState::current();
+    let stream = crate::webui::events::sse_stream(
+        state.subscribe_events(),
+        std::sync::Arc::new(crate::webui::events::SseAuth::allow_all()),
+        std::sync::Arc::new(axum::http::HeaderMap::new()),
+    );
+    let mut body = axum::response::sse::Sse::new(stream)
+        .into_response()
+        .into_body()
+        .into_data_stream();
+
+    let cfg = load_config().await.expect("读取配置");
+    let guard = SessionGuard::start(&cfg, "YT", "UC_history_sse", "界面频道", None);
+    guard.run_started(10);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = String::new();
+    while !seen.contains("event: history") {
+        assert!(
+            Instant::now() < deadline,
+            "SSE 未在期限内收到 history 事件：{seen}"
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, body.next()).await {
+            Ok(Some(Ok(chunk))) => seen.push_str(&String::from_utf8_lossy(&chunk)),
+            other => panic!("SSE 流提前结束或读取失败：{other:?}，已收到：{seen}"),
+        }
+    }
+    guard.finish(EndReason::UserStop);
+    relay.shutdown().await;
+    drop(harness);
+}
+
 #[tokio::test]
 async fn clear_refuses_an_open_relay_and_succeeds_after_it_ends() {
     let _store = storage::lock_test_global();

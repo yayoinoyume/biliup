@@ -94,6 +94,16 @@ pub(crate) fn sse_stream(
     headers: Arc<HeaderMap>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let changed = auth.subscribe();
+    sse_stream_with(rx, auth, headers, changed)
+}
+
+/// 事件流本体；唤醒端由调用方给出，测试可以直接观察钩子释放时的行为。
+fn sse_stream_with(
+    rx: broadcast::Receiver<&'static str>,
+    auth: Arc<SseAuth>,
+    headers: Arc<HeaderMap>,
+    changed: watch::Receiver<u64>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
     futures_util::stream::unfold(
         (rx, auth, headers, changed),
         |(mut rx, auth, headers, mut changed)| async move {
@@ -102,7 +112,13 @@ pub(crate) fn sse_stream(
                     return None;
                 }
                 let event = tokio::select! {
-                    _ = changed.changed() => continue,
+                    result = changed.changed() => {
+                        // 钩子已释放：不会再有撤权通知，断开比静默长连更安全。
+                        if result.is_err() {
+                            return None;
+                        }
+                        continue;
+                    }
                     _ = tokio::time::sleep(AUTH_RECHECK) => continue,
                     event = rx.recv() => event,
                 };
@@ -254,6 +270,32 @@ mod tests {
         assert!(
             closed_within(&mut stream, Duration::from_secs(1)).await,
             "撤权钩子翻 false 后必须立刻断流"
+        );
+    }
+
+    /// 撤权钩子的唤醒端被释放后，流必须立刻结束而不是空转。
+    #[tokio::test]
+    async fn a_dropped_watch_sender_ends_the_stream() {
+        use axum::response::IntoResponse;
+
+        let state = AppState::new();
+        let auth = Arc::new(SseAuth::allow_all());
+        let (sender, changed) = watch::channel(0u64);
+        let stream = sse_stream_with(
+            state.subscribe_events(),
+            Arc::clone(&auth),
+            Arc::new(HeaderMap::new()),
+            changed,
+        );
+        let mut body = Sse::new(stream)
+            .into_response()
+            .into_body()
+            .into_data_stream();
+        sender.send_modify(|revision| *revision += 1);
+        drop(sender);
+        assert!(
+            closed_within(&mut body, Duration::from_secs(1)).await,
+            "watch sender 释放后流必须立刻结束"
         );
     }
 }
