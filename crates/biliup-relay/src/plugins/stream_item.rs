@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! The provider-agnostic stream item.
 //!
 //! One [`StreamItem`] is one 直播/预告 entry as a list serves it: the shape the

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! The one answer to "is this channel live, and what do we play".
 //!
 //! YouTube, Twitch and Niconico each declared their own byte-identical

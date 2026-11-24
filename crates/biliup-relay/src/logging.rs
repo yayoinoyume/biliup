@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared human-readable tracing output. No configuration or worker locks here.
 
 #[cfg(test)]

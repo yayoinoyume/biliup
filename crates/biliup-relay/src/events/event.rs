@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared typed facts. Producers sanitize text before emitting; consumers
 //! independently interpret events without delaying the producer.
 

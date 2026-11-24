@@ -24,7 +24,7 @@ pub enum RelayBiliAccountSource {
 }
 
 /// 从两种来源解析出的同一份 B 站凭据。
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct RelayBiliCredentials {
     pub sessdata: String,
     pub bili_jct: String,
@@ -284,6 +284,22 @@ mod tests {
             load_credentials(&RelayBiliAccountSource::BiliupCookieFile { path }).unwrap(),
             standalone
         );
+    }
+
+    #[test]
+    fn standalone_encrypted_source_reads_through_the_process_store() {
+        let _guard = crate::storage::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("keys/master.key");
+        let store = crate::storage::init(&dir.path().join("data"), Some(&key)).unwrap();
+        store.write(COOKIES_DOCUMENT, biliup_document()).unwrap();
+        let credentials = load_credentials(&RelayBiliAccountSource::StandaloneEncrypted).unwrap();
+        assert_eq!(credentials.sessdata, "synthetic-sessdata-7f3a");
+        assert_eq!(credentials.dede_user_id_ck_md5, "synthetic-ckmd5-0b");
+        drop(store);
+        crate::storage::shutdown();
     }
 
     #[test]

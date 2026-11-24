@@ -1,4 +1,6 @@
-use crate::compat::bilibili;
+#![allow(dead_code)]
+
+use crate::plugins::bilibili;
 use crate::storage::Store;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};

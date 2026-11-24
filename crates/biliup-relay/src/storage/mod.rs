@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -274,9 +274,7 @@ impl Store {
     /// still holds JSON files must be upgraded through a build that imports
     /// them, once.
     pub fn open(data_dir: PathBuf, key_file: PathBuf) -> io::Result<Arc<Self>> {
-        if std::path::absolute(&key_file)?.starts_with(std::path::absolute(&data_dir)?) {
-            return Err(invalid("密钥文件必须在数据库目录之外"));
-        }
+        validate_key_location(&data_dir, &key_file)?;
         paths::private_dir(&data_dir)?;
         let lock_path = data_dir.join("instance.lock");
         let instance = match paths::create_private(&lock_path) {
@@ -623,43 +621,119 @@ impl Drop for Store {
     }
 }
 
-static GLOBAL: OnceLock<Arc<Store>> = OnceLock::new();
-static REGISTERED: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+static GLOBAL: RwLock<Option<Arc<Store>>> = RwLock::new(None);
+static REGISTERED: RwLock<Option<(PathBuf, PathBuf)>> = RwLock::new(None);
 static INITIALIZING: Mutex<()> = Mutex::new(());
 
-/// 收口进程级文档库的路径并在同一步打开它；同一进程只能登记一次。
+#[cfg(test)]
+pub(crate) static TEST_STORE_LOCK: Mutex<()> = Mutex::new(());
+
+fn canonical_for_check(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        return path.canonicalize().ok();
+    }
+    let parent = path.parent()?.canonicalize().ok()?;
+    Some(parent.join(path.file_name()?))
+}
+
+/// 词法路径加真实路径双重校验，软链不能把密钥带进数据目录。
+fn validate_key_location(data_dir: &Path, key_file: &Path) -> io::Result<()> {
+    let data = std::path::absolute(data_dir)?;
+    let key = std::path::absolute(key_file)?;
+    if key.starts_with(&data) {
+        return Err(invalid("密钥文件必须在数据库目录之外"));
+    }
+    if let (Some(data), Some(key)) = (canonical_for_check(&data), canonical_for_check(&key)) {
+        if key.starts_with(&data) {
+            return Err(invalid("密钥文件必须在数据库目录之外"));
+        }
+    }
+    Ok(())
+}
+
+/// 收口进程级文档库的路径并在同一步打开它。
+///
+/// 同一进程可安全地 start -> shutdown -> start：路径相同时复用已打开的句柄，
+/// 路径不同时先释放旧句柄（关闭 worker、SQLite 连接与实例锁）再打开新路径。
 pub fn init(data_dir: &Path, key_file: Option<&Path>) -> io::Result<Arc<Store>> {
     let data = std::path::absolute(data_dir)?;
     let key = match key_file {
         Some(path) => std::path::absolute(path)?,
         None => paths::default_key_file(&data)?,
     };
-    if key.starts_with(&data) {
-        return Err(invalid("密钥文件必须在数据库目录之外"));
+    validate_key_location(&data, &key)?;
+    let _guard = INITIALIZING
+        .lock()
+        .map_err(|_| io::Error::other("数据库初始化不可用"))?;
+    if let Some((registered, registered_key)) = REGISTERED
+        .read()
+        .map_err(|_| io::Error::other("数据库初始化不可用"))?
+        .as_ref()
+    {
+        if registered == &data && registered_key == &key {
+            if let Some(store) = GLOBAL
+                .read()
+                .map_err(|_| io::Error::other("数据库初始化不可用"))?
+                .as_ref()
+            {
+                return Ok(Arc::clone(store));
+            }
+        }
     }
-    REGISTERED
-        .set((data, key))
-        .map_err(|_| io::Error::other("转播存储路径已初始化"))?;
-    global()
+    let previous = GLOBAL
+        .write()
+        .map_err(|_| io::Error::other("数据库初始化不可用"))?
+        .take();
+    drop(previous);
+    let store = Store::open(data.clone(), key.clone())?;
+    *REGISTERED
+        .write()
+        .map_err(|_| io::Error::other("数据库初始化不可用"))? = Some((data, key));
+    *GLOBAL
+        .write()
+        .map_err(|_| io::Error::other("数据库初始化不可用"))? = Some(Arc::clone(&store));
+    Ok(store)
 }
 
 pub fn global() -> io::Result<Arc<Store>> {
-    if let Some(store) = GLOBAL.get() {
+    if let Some(store) = GLOBAL
+        .read()
+        .map_err(|_| io::Error::other("数据库初始化不可用"))?
+        .as_ref()
+    {
         return Ok(Arc::clone(store));
     }
     let _guard = INITIALIZING
         .lock()
         .map_err(|_| io::Error::other("数据库初始化不可用"))?;
-    if let Some(store) = GLOBAL.get() {
+    if let Some(store) = GLOBAL
+        .read()
+        .map_err(|_| io::Error::other("数据库初始化不可用"))?
+        .as_ref()
+    {
         return Ok(Arc::clone(store));
     }
-    let (data, key) = match REGISTERED.get() {
+    let (data, key) = match REGISTERED
+        .read()
+        .map_err(|_| io::Error::other("数据库初始化不可用"))?
+        .as_ref()
+    {
         Some((data, key)) => (data.clone(), key.clone()),
         None => fallback_paths()?,
     };
     let store = Store::open(data, key)?;
-    let _ = GLOBAL.set(Arc::clone(&store));
+    *GLOBAL
+        .write()
+        .map_err(|_| io::Error::other("数据库初始化不可用"))? = Some(Arc::clone(&store));
     Ok(store)
+}
+
+/// 释放进程级文档库：关闭 worker、SQLite 连接与实例锁，并清空已登记路径。
+pub fn shutdown() {
+    let _guard = INITIALIZING.lock().unwrap_or_else(|e| e.into_inner());
+    let store = GLOBAL.write().unwrap_or_else(|e| e.into_inner()).take();
+    *REGISTERED.write().unwrap_or_else(|e| e.into_inner()) = None;
+    drop(store);
 }
 
 #[cfg(test)]

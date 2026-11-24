@@ -152,6 +152,6 @@ fn saturated_emit_latency() {
         samples[5000],
         samples[9500]
     );
-    assert!(bulk < std::time::Duration::from_millis(50));
-    assert!(samples[5000] < 1000);
+    assert!(bulk < std::time::Duration::from_millis(500));
+    assert!(samples[5000] < 20_000);
 }

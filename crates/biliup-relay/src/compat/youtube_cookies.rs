@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! 真实的 Netscape Cookie 格式校验；完整 yt-dlp Cookie 管理待 Phase 2 迁入。
 
 use std::collections::HashSet;

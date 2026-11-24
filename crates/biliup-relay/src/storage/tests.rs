@@ -561,3 +561,81 @@ fn old_format_channel_keys_are_refused_by_name_without_their_content() {
         }
     }
 }
+
+#[test]
+fn store_can_be_shutdown_and_reopened_in_the_same_process() {
+    let _guard = TEST_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let key = dir.path().join("keys/master.key");
+    let store = init(&data, Some(&key)).unwrap();
+    store.write("invalid_words.txt", json!("保留")).unwrap();
+    drop(store);
+    shutdown();
+    let reopened = init(&data, Some(&key)).unwrap();
+    assert_eq!(
+        reopened.read("invalid_words.txt").unwrap().unwrap().value,
+        json!("保留"),
+        "重启后文档必须从同一个加密库读出"
+    );
+    drop(reopened);
+    shutdown();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_key_parent_cannot_bypass_the_data_dir_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&data, outside.join("link")).unwrap();
+    let key = outside.join("link/master.key");
+    let Err(error) = Store::open(data, key) else {
+        panic!("软链密钥路径必须被拒绝");
+    };
+    assert!(
+        error.to_string().contains("密钥文件必须在数据库目录之外"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_legacy_bilistream_database_is_renamed_in_place_and_remains_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let legacy = data.join(LEGACY_DB_FILE);
+    {
+        let conn = Connection::open(&legacy).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE documents(name TEXT PRIMARY KEY,payload BLOB NOT NULL,encrypted INTEGER NOT NULL,revision INTEGER NOT NULL,updated_at INTEGER NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO documents(name,payload,encrypted,revision,updated_at) VALUES(?1,?2,0,1,?3)",
+            rusqlite::params![
+                "invalid_words.txt",
+                serde_json::to_vec(&json!("旧库过滤词")).unwrap(),
+                now()
+            ],
+        )
+        .unwrap();
+    }
+    fs::write(data.join("bilistream.db-wal"), b"").unwrap();
+    let key = dir.path().join("keys/master.key");
+    paths::load_key(&key, false).unwrap();
+    let store = Store::open(data.clone(), key).unwrap();
+    assert!(!legacy.exists(), "旧库文件必须原地改名");
+    assert!(!data.join("bilistream.db-wal").exists(), "旧 -wal 必须一并改名");
+    assert!(data.join(DB_FILE).exists(), "新库文件必须出现");
+    assert_eq!(
+        store.read("invalid_words.txt").unwrap().unwrap().value,
+        json!("旧库过滤词"),
+        "迁移后文档内容必须完整可读"
+    );
+    drop(store);
+}

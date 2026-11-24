@@ -82,9 +82,33 @@ async fn stop_and_assert_released(
     );
 }
 
+fn home_key_files() -> Vec<String> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let dir = std::path::PathBuf::from(home)
+        .join(".config")
+        .join("bilistream")
+        .join("keys");
+    let mut names = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn relay_health_is_ready_behind_optional_auth() {
     let logging = init_tracing_with("info", false);
+    let key_dir = tempfile::tempdir().unwrap();
+    let key_file = key_dir.path().join("master.key");
+    let home_keys_before = home_key_files();
+    unsafe { std::env::set_var("BILISTREAM_KEY_FILE", &key_file) };
 
     let open_dir = tempfile::tempdir().unwrap();
     let (port, stop, task) = spawn_server(false, open_dir.path(), &logging);
@@ -112,4 +136,11 @@ async fn relay_health_is_ready_behind_optional_auth() {
     let (status, body) = wait_for_answer(port).await;
     assert_eq!(status, 401, "开启 --auth 后未登录应被拦截：{body}");
     stop_and_assert_released(port, stop, task).await;
+
+    assert!(key_file.exists(), "测试密钥必须落在临时目录");
+    assert_eq!(
+        home_key_files(),
+        home_keys_before,
+        "测试不得向真实 $HOME/.config/bilistream/keys 写入新密钥"
+    );
 }

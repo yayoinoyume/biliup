@@ -6,27 +6,38 @@ description = "转播引擎底座：加密存储、配置文档、事件总线�
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+anyhow = "1.0"
 base64 = "0.23"
+brotli = "8"
+byteorder = "1.5"
 chrono = { workspace = true }
+flate2 = "1.1"
+futures-util = "0.3"
 getrandom = "0.3"
 lazy_static = "1.4"
 libc = "0.2"
 md-5 = "0.10"
 percent-encoding = "2.3"
+qrcode = "0.14"
 regex = { workspace = true }
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "multipart"] }
+reqwest-middleware = { version = "0.5", features = ["form", "json"] }
+reqwest-retry = "0.9"
 ring = "0.17.14"
 rusqlite = { version = "0.32.1", features = ["bundled", "backup", "hooks"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["float_roundtrip"] }
+serde_urlencoded = "0.7"
 sha2 = "0.10"
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "time"] }
+tokio = { workspace = true, features = ["io-util", "time", "net", "fs"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["chrono"] }
 unicode-width = "0.2"
 zeroize = "1.8"
 
 [dev-dependencies]
+axum = "0.8"
 tempfile = "3"

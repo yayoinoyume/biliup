@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod app_state;
 pub mod compat;
 pub mod config;
@@ -123,13 +121,16 @@ impl RelayService {
     }
 
     pub async fn shutdown(&self) {
-        let mut inner = lock(&self.inner);
-        if inner.storage.is_none() && inner.state == STATE_STOPPED {
-            return;
+        {
+            let mut inner = lock(&self.inner);
+            if inner.storage.is_none() && inner.state == STATE_STOPPED {
+                return;
+            }
+            inner.storage = None;
+            inner.ready = false;
+            inner.state = String::from(STATE_STOPPED);
         }
-        inner.storage = None;
-        inner.ready = false;
-        inner.state = String::from(STATE_STOPPED);
+        storage::shutdown();
     }
 }
 
@@ -176,11 +177,15 @@ mod tests {
 
     #[tokio::test]
     async fn start_opens_the_encrypted_store_and_shutdown_is_idempotent() {
+        let _guard = storage::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let relay = RelayService::new();
+        let key_file = dir.path().join("keys/master.key");
         let cfg = RelayInitConfig {
             data_dir: dir.path().join("relay"),
-            key_file: None,
+            key_file: Some(key_file.clone()),
             ffmpeg_path: None,
         };
 
@@ -193,6 +198,10 @@ mod tests {
 
         let database = cfg.data_dir.join(DB_FILE);
         assert!(database.exists(), "加密库应落在 data 目录内");
+        assert!(
+            key_file.exists(),
+            "显式 key_file 必须落在数据目录之外"
+        );
         assert!(
             !cfg.data_dir
                 .read_dir()
@@ -217,7 +226,7 @@ mod tests {
         assert_eq!(encrypted, 0, "非敏感文档以明文存储");
         drop(probe);
 
-        relay.start(cfg).await.expect("重复启动应幂等");
+        relay.start(cfg.clone()).await.expect("重复启动应幂等");
         assert_eq!(relay.health().state, STATE_READY);
 
         relay.shutdown().await;
@@ -226,5 +235,15 @@ mod tests {
         assert_eq!(health.state, STATE_STOPPED);
         assert!(!health.enabled);
         assert!(!health.storage_ready);
+
+        relay.start(cfg.clone()).await.expect("关闭后应能在同进程重启");
+        assert_eq!(relay.health().state, STATE_READY);
+        let reopened = rusqlite::Connection::open(&database).unwrap();
+        let documents: i64 = reopened
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(documents, 1, "重启后原有文档仍可读");
+        drop(reopened);
+        relay.shutdown().await;
     }
 }
