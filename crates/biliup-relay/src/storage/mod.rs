@@ -678,9 +678,16 @@ pub fn init(data_dir: &Path, key_file: Option<&Path>) -> io::Result<Arc<Store>> 
         .map_err(|_| io::Error::other("数据库初始化不可用"))?
         .as_ref()
     {
-        // 同一条物理路径的不同拼写（软链、..）不该被当成换库，也不该报实例锁冲突。
-        let same_data = normalize_for_check(registered)? == normalize_for_check(&data)?;
-        let same_key = normalize_for_check(registered_key)? == normalize_for_check(&key)?;
+        // 同一条物理路径的不同拼写（软链、..）不该被当成换库，也不该报实例锁冲突；
+        // 解析失败时退回字面比较，避免旧的登记路径把本次 init 直接判死。
+        let same_data = match (normalize_for_check(registered), normalize_for_check(&data)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => registered == &data,
+        };
+        let same_key = match (normalize_for_check(registered_key), normalize_for_check(&key)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => registered_key == &key,
+        };
         if same_data && same_key {
             if let Some(store) = GLOBAL
                 .read()

@@ -200,32 +200,15 @@ pub(crate) fn cleanup_stale(directory: &std::path::Path) {
         #[cfg(unix)]
         let alive = unsafe { libc::kill(pid as i32, 0) == 0 }
             || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        // shortcut: Windows 暂不引入系统 API 依赖判断进程存活，退化为清理过期临时文件；后续 Windows 发布前按需补齐。
         #[cfg(windows)]
-        let alive = windows_process_alive(pid);
+        let alive = false;
         if !alive {
             let _ = fs::remove_file(path.join("cookies.txt"));
             let _ = fs::remove_file(path.join("child.pid"));
             let _ = fs::remove_dir(path);
         }
     }
-}
-
-#[cfg(windows)]
-fn windows_process_alive(pid: u32) -> bool {
-    use winapi::um::{
-        handleapi::CloseHandle, processthreadsapi::OpenProcess, synchapi::WaitForSingleObject,
-        winbase::WAIT_OBJECT_0, winnt::SYNCHRONIZE,
-    };
-    let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
-    if process.is_null() {
-        // Invalid process ID means it exited; access denied is not evidence.
-        return io::Error::last_os_error().raw_os_error() != Some(87);
-    }
-    let state = unsafe { WaitForSingleObject(process, 0) };
-    unsafe {
-        CloseHandle(process);
-    }
-    state != WAIT_OBJECT_0
 }
 
 pub async fn run(command: Command, browser: Option<String>, limit: Duration) -> io::Result<Output> {

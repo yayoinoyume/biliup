@@ -6,7 +6,7 @@
 //! decayed as time passes, so the shape follows the roster's current habits.
 //! The uploads-playlist poller spreads its budget over the day by these weights
 //! (`youtube_discovery::hourly_intervals`). The counts live in
-//! `youtube_golive_hours.json` next to the binary, so a restart keeps them.
+//! the `crate::storage` document `youtube_golive_hours.json`, so a restart keeps them.
 
 use super::youtube_data::YtVideo;
 use chrono::{DateTime, Timelike, Utc};

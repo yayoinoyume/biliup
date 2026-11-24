@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 //! 待 Phase 2 集群同步迁入后替换。
+//! 本阶段忽略 cfg.cluster.*，恒按单机语义回答。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
