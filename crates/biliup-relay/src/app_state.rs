@@ -165,6 +165,7 @@ impl AppState {
 
     pub fn publish(&self, kind: &'static str) {
         let _ = self.inner.events.send(kind);
+        crate::ui_events::publish(kind);
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<&'static str> {

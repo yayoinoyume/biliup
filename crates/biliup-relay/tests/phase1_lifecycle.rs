@@ -88,6 +88,7 @@ async fn boot() -> (Harness, RelayService) {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn process_exited(pid: u32) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Err(_) => true,
@@ -98,6 +99,7 @@ fn process_exited(pid: u32) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_until<F, Fut>(what: &str, mut probe: F) -> bool
 where
     F: FnMut() -> Fut,
@@ -115,6 +117,7 @@ where
 }
 
 /// 弹幕客户端的零外网替身：只跑真实的运行标志与停止信号协议。
+#[cfg(target_os = "linux")]
 fn start_danmaku_stand_in() -> tokio::task::JoinHandle<()> {
     biliup_relay::plugins::set_danmaku_stop_signal(false);
     biliup_relay::plugins::set_danmaku_running(true);
@@ -127,6 +130,7 @@ fn start_danmaku_stand_in() -> tokio::task::JoinHandle<()> {
 }
 
 /// 启动一个只登记本地占位推流进程的监控任务，并回报该进程 PID。
+#[cfg(target_os = "linux")]
 fn start_placeholder_engine(relay: &RelayService) -> Arc<Mutex<Option<u32>>> {
     let pid_slot: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
     let slot = Arc::clone(&pid_slot);
@@ -140,6 +144,7 @@ fn start_placeholder_engine(relay: &RelayService) -> Arc<Mutex<Option<u32>>> {
     pid_slot
 }
 
+#[cfg(target_os = "linux")]
 async fn engine_is_up(pid_slot: &Arc<Mutex<Option<u32>>>) -> bool {
     let slot = Arc::clone(pid_slot);
     let started = wait_until("监控任务登记占位推流进程", move || {
@@ -161,6 +166,7 @@ async fn engine_is_up(pid_slot: &Arc<Mutex<Option<u32>>>) -> bool {
     true
 }
 
+#[cfg(target_os = "linux")]
 fn taken_pid(pid_slot: &Arc<Mutex<Option<u32>>>) -> u32 {
     pid_slot
         .lock()
@@ -168,6 +174,7 @@ fn taken_pid(pid_slot: &Arc<Mutex<Option<u32>>>) -> u32 {
         .expect("占位推流进程 PID")
 }
 
+#[cfg(target_os = "linux")]
 async fn assert_engine_stopped(pid: u32) {
     assert!(
         wait_until("弹幕替身收到停止信号", || async {
@@ -205,6 +212,7 @@ async fn assert_restart_reads_back(harness: &Harness, relay: &RelayService, inte
     relay.shutdown().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn shutdown_stops_a_real_local_engine_and_releases_storage() {
     let _serial = SERIAL.lock().await;
@@ -251,6 +259,7 @@ async fn shutdown_stops_a_real_local_engine_and_releases_storage() {
     assert_restart_reads_back(&harness, &relay, 60).await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn stop_then_shutdown_does_not_lose_the_engine_cleanup() {
     let _serial = SERIAL.lock().await;
@@ -261,8 +270,9 @@ async fn stop_then_shutdown_does_not_lose_the_engine_cleanup() {
     assert!(engine_is_up(&pid_slot).await, "监控任务必须真的把引擎跑起来");
     let pid = taken_pid(&pid_slot);
 
-    assert!(
+    assert_eq!(
         relay.stop_monitor_loop().await,
+        biliup_relay::MonitorStopOutcome::Stopped,
         "监控线程应当自己完成收尾"
     );
     // 引擎由监控线程停掉；之后的 shutdown 仍必须干净释放存储。
@@ -274,6 +284,7 @@ async fn stop_then_shutdown_does_not_lose_the_engine_cleanup() {
     assert_restart_reads_back(&harness, &relay, 60).await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn dropping_the_service_still_stops_the_monitor_thread_and_engine() {
     let _serial = SERIAL.lock().await;
@@ -300,4 +311,80 @@ async fn dropping_the_service_still_stops_the_monitor_thread_and_engine() {
     assert_eq!(reloaded.interval, 60);
     assert!(Path::new(&harness.data_dir).exists());
     reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn storage_round_trip_survives_a_plain_restart() {
+    let _serial = SERIAL.lock().await;
+    let (harness, relay) = boot().await;
+
+    let mut cfg = load_config().await.expect("读取配置");
+    cfg.interval = 43;
+    save_config(&mut cfg).await.expect("写入配置");
+    relay.shutdown().await;
+
+    assert_restart_reads_back(&harness, &relay, 43).await;
+}
+
+#[tokio::test]
+async fn dropping_the_service_releases_storage_after_a_finished_monitor() {
+    let _serial = SERIAL.lock().await;
+    let (harness, relay) = boot().await;
+
+    let (done, finished) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        relay.spawn_monitor_loop_with(move || async move {
+            let _ = done.send(());
+        }),
+        biliup_relay::MonitorSpawnOutcome::Started
+    );
+    finished.await.expect("监控任务应自然结束");
+    // 清理在同一线程里紧跟任务执行，给它跑完的时间再 drop。
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let probe = biliup_relay::storage::init(&harness.data_dir, harness.init.key_file.as_deref())
+        .expect("复用已打开的存储");
+    let weak = std::sync::Arc::downgrade(&probe);
+    drop(probe);
+
+    drop(relay);
+
+    assert!(
+        weak.upgrade().is_none(),
+        "监控已收尾时 drop 必须立刻释放全局存储句柄"
+    );
+    let reopened = biliup_relay::storage::init(&harness.data_dir, harness.init.key_file.as_deref())
+        .expect("drop 之后应能立刻重开存储");
+    let reloaded = load_config().await.expect("重开后读取配置");
+    assert_eq!(reloaded.interval, 60);
+    drop(reopened);
+    biliup_relay::storage::shutdown();
+}
+
+#[tokio::test]
+async fn refresh_status_cache_config_from_writes_room_and_sources() {
+    let _serial = SERIAL.lock().await;
+    let (_harness, relay) = boot().await;
+
+    let mut cfg = load_config().await.expect("读取配置");
+    cfg.bililive.room = 4321;
+    cfg.bililive.enable_danmaku_command = true;
+    cfg.youtube.channel_name = "yt-频道".to_string();
+    cfg.youtube.channel_id = "UC_refresh".to_string();
+    cfg.priority_channel.enabled = true;
+    cfg.priority_channel.channel_name = "priority-频道".to_string();
+    save_config(&mut cfg).await.expect("写入配置");
+
+    biliup_relay::refresh_status_cache_config_from(&cfg);
+    let cached = biliup_relay::get_status_cache()
+        .expect("配置必须真实写进状态缓存");
+    assert_eq!(cached.bilibili.room, 4321);
+    assert!(cached.bilibili.enable_danmaku_command);
+    assert_eq!(
+        cached.youtube.expect("youtube 状态").channel_id,
+        "UC_refresh"
+    );
+    assert!(cached.priority_channel.expect("优先频道状态").enabled);
+
+    relay.shutdown().await;
 }

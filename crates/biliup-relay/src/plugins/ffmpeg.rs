@@ -912,7 +912,15 @@ pub async fn is_ffmpeg_running() -> bool {
 /// 只登记进程（`stop_ffmpeg()` 会按正常路径终止并回收它），不建立任何连接，
 /// 也不启动 reader/统计任务。返回子进程 PID。
 #[doc(hidden)]
+#[cfg(target_os = "linux")]
 pub async fn track_local_publisher_for_test() -> std::io::Result<u32> {
+    let mut supervisor = FFMPEG_SUPERVISOR.lock().await;
+    if supervisor.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "已有本地推流进程登记在案，拒绝覆盖",
+        ));
+    }
     let mut command = Command::new("sleep");
     command.arg("1000").kill_on_drop(true);
     let child = FFMPEG_SUPERVISOR.spawn(&mut command)?;
@@ -921,7 +929,7 @@ pub async fn track_local_publisher_for_test() -> std::io::Result<u32> {
     let identity = FfmpegStreamIdentity::new("local", "YT", "本地占位频道", "local-placeholder");
     let context = SessionLogContext::new(identity, session);
     let log = ChildLogContext::new(&context, ChildRole::Ffmpeg(FfmpegStatsRole::Push), pid);
-    *FFMPEG_SUPERVISOR.lock().await = Some(FfmpegProcess {
+    *supervisor = Some(FfmpegProcess {
         session,
         log: context,
         tasks: SessionTasks::default(),
@@ -4776,5 +4784,30 @@ mod tests {
 
         assert!(tracker.file_sizes.contains_key(&keep));
         assert!(!tracker.file_sizes.contains_key(&remove));
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn local_publisher_tracking_rejects_a_second_registration() {
+        run_supervisor_test(async {
+            let first = track_local_publisher_for_test()
+                .await
+                .expect("首次登记应成功");
+            assert!(is_ffmpeg_running().await);
+            assert_eq!(
+                track_local_publisher_for_test()
+                    .await
+                    .expect_err("重复登记必须被拒绝")
+                    .kind(),
+                std::io::ErrorKind::AlreadyExists
+            );
+            assert!(
+                is_ffmpeg_running().await,
+                "被拒绝的登记不得破坏第一个推流进程"
+            );
+            stop_ffmpeg().await;
+            clear_manual_stop();
+            assert!(!is_ffmpeg_running().await);
+            let _ = first;
+        });
     }
 }
