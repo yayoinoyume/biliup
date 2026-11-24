@@ -17,6 +17,7 @@ static SERIAL: Mutex<()> = Mutex::const_new(());
 struct Harness {
     _dir: tempfile::TempDir,
     data_dir: PathBuf,
+    init: RelayInitConfig,
 }
 
 fn seed(room: i32) -> Config {
@@ -31,18 +32,52 @@ async fn boot(room: i32) -> (Harness, RelayService) {
     let dir = tempfile::tempdir().expect("临时目录");
     let data_dir = dir.path().join("relay");
     let key_file = dir.path().join("keys/master.key");
+    let init = RelayInitConfig {
+        data_dir: data_dir.clone(),
+        key_file: Some(key_file.clone()),
+        ffmpeg_path: None,
+    };
     storage::init(&data_dir, Some(&key_file)).expect("打开存储");
     storage::write_document("config.json", &seed(room)).expect("写入配置");
     let relay = RelayService::new();
+    relay.start(init.clone()).await.expect("启动应成功");
+    (Harness {
+        _dir: dir,
+        data_dir,
+        init,
+    }, relay)
+}
+
+/// 同进程、同一数据目录再启动一次服务。
+async fn restart(init: &RelayInitConfig) -> RelayService {
+    let relay = RelayService::new();
+    relay.start(init.clone()).await.expect("同目录重启应成功");
     relay
-        .start(RelayInitConfig {
-            data_dir: data_dir.clone(),
-            key_file: Some(key_file),
-            ffmpeg_path: None,
-        })
-        .await
-        .expect("启动应成功");
-    (Harness { _dir: dir, data_dir }, relay)
+}
+
+/// 会话的 boot_id 必须能在 boots 表中找到，且 boots 汇总不为 NULL。
+fn assert_boot_rows(db: &str, label: &str) {
+    let conn = super::schema::open_ro(std::path::Path::new(db)).expect("只读打开统计库");
+    let orphan: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sessions s
+             WHERE NOT EXISTS(SELECT 1 FROM boots b WHERE b.boot_id=s.boot_id)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("查询悬空会话");
+    assert_eq!(orphan, 0, "{label}：会话的 boot_id 必须都有 boots 行");
+    let (last_seen, started): (Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT max(last_seen_at), min(started_at) FROM boots",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("查询 boots 汇总");
+    assert!(
+        last_seen.is_some() && started.is_some(),
+        "{label}：boots 汇总不得为 NULL（{last_seen:?}/{started:?}）"
+    );
 }
 
 fn lock_store() -> std::sync::MutexGuard<'static, ()> {
@@ -205,6 +240,9 @@ async fn two_data_directories_in_one_process_stay_independent() {
         })
         .expect("B 的会话行");
     assert_eq!(channel, "UC_history_dir_b");
+    // 第二次 start 必须重新发出进程启动事实，否则新目录的会话 boot_id 悬空。
+    assert_boot_rows(&db_a, "目录 A");
+    assert_boot_rows(&db_b, "目录 B");
 }
 
 #[tokio::test]
@@ -254,4 +292,71 @@ async fn clear_refuses_an_open_relay_and_succeeds_after_it_ends() {
         "清理后本会话的行必须消失"
     );
     relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn restarting_in_the_same_directory_advances_the_boot_row() {
+    let _serial = SERIAL.lock().await;
+    let _store = lock_store();
+    let (harness, relay) = boot(710_001).await;
+    let cfg = load_config().await.expect("读取配置");
+    let first = SessionGuard::start(&cfg, "YT", "UC_history_boot_a", "同目录A", None);
+    let first_seq = first.seq();
+    first.finish(EndReason::SourceEnded);
+    relay.shutdown().await;
+    drop(relay);
+
+    let db = harness.data_dir.join("history.sqlite").display().to_string();
+    let first_last_seen: i64 = super::schema::open_ro(std::path::Path::new(&db))
+        .expect("只读打开")
+        .query_row("SELECT max(last_seen_at) FROM boots", [], |row| row.get(0))
+        .expect("第一次启停必须有 boots 行");
+    assert!(first_last_seen > 0, "首次启停的 boots 行必须存在");
+
+    let relay = restart(&harness.init).await;
+    let cfg = load_config().await.expect("重启后配置");
+    let second = SessionGuard::start(&cfg, "YT", "UC_history_boot_b", "同目录B", None);
+    let second_seq = second.seq();
+    let later = crate::storage::now().max(first_last_seen as u64) + 3;
+    super::emit_at(
+        later,
+        super::EventKind::StatsSample {
+            seq: second_seq,
+            bitrate_kbps: (100.0, 120.0, 140.0),
+            fps: None,
+            speed: None,
+        },
+    );
+    second.finish(EndReason::UserStop);
+    relay.shutdown().await;
+
+    let conn = super::schema::open_ro(std::path::Path::new(&db)).expect("只读打开");
+    let orphan: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sessions s
+             WHERE NOT EXISTS(SELECT 1 FROM boots b WHERE b.boot_id=s.boot_id)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("查询悬空会话");
+    assert_eq!(orphan, 0, "同目录重启后不得有悬空会话");
+    let sessions: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sessions WHERE seq IN (?1,?2)",
+            [first_seq as i64, second_seq as i64],
+            |row| row.get(0),
+        )
+        .expect("两次会话都在");
+    assert_eq!(sessions, 2, "同目录两次启停各有一条会话");
+    let last_seen: i64 = conn
+        .query_row("SELECT max(last_seen_at) FROM boots", [], |row| row.get(0))
+        .expect("重启后的 boots 行");
+    assert!(
+        last_seen >= later as i64,
+        "boots.last_seen_at 必须推进到第二次事件时间（{last_seen} < {later}）"
+    );
+    assert!(
+        last_seen > first_last_seen,
+        "boots.last_seen_at 不得冻结在第一次停机时刻（{last_seen} <= {first_last_seen}）"
+    );
 }

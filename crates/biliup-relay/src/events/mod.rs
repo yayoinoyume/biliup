@@ -61,20 +61,24 @@ impl Bus {
     }
 
     #[cfg(test)]
-    pub(crate) fn seal(&self) {
-        self.seal_with_initial(None);
+    pub(crate) fn seal(&self) -> bool {
+        self.seal_with_initial(None)
     }
 
-    fn seal_with_initial(&self, initial: Option<Event>) {
+    /// Returns true only for the call that sealed the registry; the startup
+    /// fact is emitted exactly once, by that call.
+    fn seal_with_initial(&self, initial: Option<Event>) -> bool {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        if self.sealed.get().is_none() {
-            let _ = self.sealed.set(std::mem::take(&mut *pending).into());
-            if let Some(event) = initial {
-                self.emit_at(event.at, event.kind);
-            }
-            self.initialized.store(true, Ordering::Release);
-            self.ready.notify_waiters();
+        if self.sealed.get().is_some() {
+            return false;
         }
+        let _ = self.sealed.set(std::mem::take(&mut *pending).into());
+        if let Some(event) = initial {
+            self.emit_at(event.at, event.kind);
+        }
+        self.initialized.store(true, Ordering::Release);
+        self.ready.notify_waiters();
+        true
     }
 
     pub(crate) fn emit_at(&self, at: u64, kind: EventKind) {
@@ -113,13 +117,18 @@ pub fn register(
     BUS.register(name, cap, filter)
 }
 
-pub fn seal() {
+/// Seal the registry and emit the process-startup fact.
+///
+/// Returns true only for the call that sealed it. A later start in the same
+/// process must emit its own ProcessStarted: the history writer records the
+/// boot row (and sweeps older boots) on that event only.
+pub fn seal() -> bool {
     BUS.seal_with_initial(Some(Event {
         at: now(),
         kind: EventKind::ProcessStarted {
             version: env!("CARGO_PKG_VERSION"),
         },
-    }));
+    }))
 }
 
 pub fn is_sealed() -> bool {

@@ -175,7 +175,14 @@ impl RelayService {
         // 统计引擎先注册总线消费者，再让 seal 发出进程启动事实；
         // 顺序颠倒会让统计静默漏收本进程的全部事件。
         history::start().await;
-        events::seal();
+        if !events::seal() {
+            // 第二次及以后的 start：seal 只在首次补发进程启动事实，而统计库
+            // 需要一行 boots 才能让本次进程的会话不悬空、并让心跳继续推进
+            // last_seen_at；因此这里按同一事实补发一次。
+            events::emit(events::EventKind::ProcessStarted {
+                version: env!("CARGO_PKG_VERSION"),
+            });
+        }
         let mut inner = lock(&self.inner);
         inner.state = String::from(STATE_READY);
         inner.data_dir = cfg.data_dir;

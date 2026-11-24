@@ -20,17 +20,21 @@ const T0: i64 = 1_791_000_000;
 #[path = "completion_tests.rs"]
 mod completion;
 
+thread_local! {
+    /// 每个测试线程的临时目录。libtest 一个用例一个线程，线程退出时 TLS
+    /// 析构会删掉这些目录，所以测试跑完不再往 /tmp 里堆目录。
+    static TEST_DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn tmp(name: &str) -> std::path::PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "bilistream-history-{name}-{}-{}-{}",
-        std::process::id(),
-        crate::storage::now(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("bilistream-history-{name}-"))
+        .tempdir()
+        .expect("创建统计测试临时目录");
+    let path = dir.path().to_path_buf();
+    TEST_DIRS.with(|dirs| dirs.borrow_mut().push(dir));
+    path
 }
 
 fn writer(name: &str) -> (Writer, std::path::PathBuf) {
@@ -1674,26 +1678,24 @@ fn capture_writes_only_to_the_git_ignored_fixtures_dir() {
     // 忽略规则，再用真实的 git check-ignore 验证 capture 目录不被跟踪。
     let repo = tmp("capture-repo");
     std::fs::write(repo.join(".gitignore"), "/.trellis/\n").unwrap();
-    let initialized = std::process::Command::new("git")
+    let init = std::process::Command::new("git")
         .arg("-C")
         .arg(&repo)
         .args(["init", "-q"])
         .status()
-        .is_ok_and(|status| status.success());
-    if initialized {
-        let dir = super::capture::fixtures_dir(&repo);
-        assert!(dir.ends_with(".trellis/fixtures"));
-        let probe = dir.join("stoplivedata-probe.json");
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["check-ignore", "-q", "--no-index"])
-            .arg(&probe)
-            .status();
-        if let Ok(status) = status {
-            assert!(status.success(), "{probe:?} must be git-ignored");
-        }
-    }
+        .expect("git 必须可执行：capture 目录的忽略规则要用真实 git 校验");
+    assert!(init.success(), "git init 失败");
+    let dir = super::capture::fixtures_dir(&repo);
+    assert!(dir.ends_with(".trellis/fixtures"));
+    let probe = dir.join("stoplivedata-probe.json");
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["check-ignore", "-q", "--no-index"])
+        .arg(&probe)
+        .status()
+        .expect("git check-ignore 必须可执行");
+    assert!(status.success(), "{probe:?} must be git-ignored");
     let root = tmp("capture");
     let reply: Value = serde_json::from_str(LIVE_SESSION).unwrap();
     let file = super::capture::write_to(

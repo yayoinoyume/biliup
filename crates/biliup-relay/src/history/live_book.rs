@@ -864,14 +864,11 @@ mod tests {
 
     #[test]
     fn durable_book_restores_claims_metadata_and_totals_across_restarts() {
-        let path = std::env::temp_dir().join(format!(
-            "bilistream-live-book-{}-{}.sqlite",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = tempfile::Builder::new()
+            .prefix("bilistream-live-book-")
+            .tempdir()
+            .expect("创建直播簿测试临时目录");
+        let path = dir.path().join("history.sqlite");
         let mut book = stopped();
         book.claim(42, "synthetic-broadcast", "a", 100, 60).unwrap();
         {

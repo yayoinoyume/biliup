@@ -43,7 +43,7 @@ pub(crate) fn is_stock_detail(detail: &str) -> bool {
 }
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
@@ -116,6 +116,12 @@ static EVENT_RX: Mutex<Option<Receiver<Arc<Event>>>> = Mutex::new(None);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Bounded wait for the writer thread to leave during shutdown.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// A writer that outlived shutdown: refuse to open a second one in the same
+/// process rather than let two connections write the same file.
+static ORPHANED: AtomicBool = AtomicBool::new(false);
+/// Relay sessions holding a live guard. Clear refuses while any exists, which
+/// closes the window between the session event and the published sequence.
+static ACTIVE_GUARDS: AtomicUsize = AtomicUsize::new(0);
 /// Serializes start(): the bus consumer may be taken or registered once, and
 /// the handle must be installed by the same caller that took it.
 static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -216,6 +222,14 @@ pub(crate) async fn request_flush(sender: &mpsc::Sender<Control>, timeout: Durat
     .unwrap_or(false)
 }
 
+/// A fresh boot identity per start, never read back from the database.
+///
+/// It must stay per start, not per process: eids are node:boot:counter and the
+/// counter restarts at zero, so a reused boot would collide with the previous
+/// start's rows in the same file (sessions.eid is UNIQUE), and crash_sweep
+/// closes the previous boot's open sessions by comparing boot ids. Each start
+/// gets its own boots row instead, because RelayService re-emits ProcessStarted
+/// when the bus was already sealed.
 pub(crate) fn boot_id() -> i64 {
     let mut bytes = [0u8; 8];
     if getrandom::fill(&mut bytes).is_err() {
@@ -243,10 +257,17 @@ fn secrets_of(cfg: &crate::config::Config) -> Vec<String> {
 /// is parked, because the bus registry can only be joined before the seal.
 pub async fn start() {
     let _serial = START_LOCK.lock().await;
+    if ORPHANED.load(Ordering::Acquire) {
+        tracing::error!("上一个统计写入线程未按预期退出，本进程不再启动新的统计引擎");
+        return;
+    }
     if handle_lock().is_some() {
         return;
     }
-    let rx = event_receiver();
+    let Some(rx) = event_receiver() else {
+        ACTIVE.store(false, Ordering::Release);
+        return;
+    };
     let Ok(cfg) = crate::config::load_config().await else {
         park_event_receiver(rx);
         return;
@@ -304,9 +325,20 @@ pub async fn start() {
     }
     set_state(&shared, "starting", None);
     let thread_shared = Arc::clone(&shared);
+    // Hand the receiver over through a slot: if the thread cannot be created,
+    // the receiver is recovered instead of being dropped with the closure.
+    let handoff = Arc::new(Mutex::new(Some(rx)));
+    let thread_handoff = Arc::clone(&handoff);
     let spawned = std::thread::Builder::new()
         .name("history-writer".into())
         .spawn(move || {
+            let Some(rx) = thread_handoff
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            else {
+                return;
+            };
             let inner_shared = Arc::clone(&thread_shared);
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let conn = match schema::open_rw(&inner_shared.path) {
@@ -336,6 +368,21 @@ pub async fn start() {
     let writer_thread = match spawned {
         Ok(thread) => thread,
         Err(_) => {
+            // The thread never started: give the receiver back and drop the
+            // half-installed handle so a later start is not blocked by it.
+            if let Some(rx) = handoff.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                park_event_receiver(rx);
+            }
+            {
+                let mut slot = handle_lock();
+                if slot
+                    .as_ref()
+                    .is_some_and(|handle| Arc::ptr_eq(&handle.shared, &shared))
+                {
+                    *slot = None;
+                }
+            }
+            ACTIVE.store(false, Ordering::Release);
             set_state(&shared, "error", Some("writer thread".into()));
             return;
         }
@@ -360,13 +407,24 @@ pub async fn start() {
 /// The process-wide bus consumer, registered once before the seal and then
 /// reused across restarts. Facts still queued from a previous database are
 /// discarded: they belong to no open file.
-fn event_receiver() -> Receiver<Arc<Event>> {
+fn event_receiver() -> Option<Receiver<Arc<Event>>> {
     let mut slot = EVENT_RX.lock().unwrap_or_else(|e| e.into_inner());
-    let mut rx = slot.take().unwrap_or_else(|| {
-        crate::events::register("history", QUEUE, |_| ACTIVE.load(Ordering::Relaxed))
-    });
+    let mut rx = match slot.take() {
+        Some(rx) => rx,
+        None => {
+            let rx =
+                crate::events::register("history", QUEUE, |_| ACTIVE.load(Ordering::Relaxed));
+            if crate::events::is_sealed() && rx.is_closed() {
+                // The registry can only be joined before the seal; pretending
+                // to run here would leave statistics silently dead.
+                tracing::error!("统计无法订阅事件总线：封口后才注册消费者，本进程统计不可用");
+                return None;
+            }
+            rx
+        }
+    };
     while rx.try_recv().is_ok() {}
-    rx
+    Some(rx)
 }
 
 fn park_event_receiver(rx: Receiver<Arc<Event>>) {
@@ -385,8 +443,10 @@ pub async fn shutdown(flush_timeout: Duration) {
     let Some(handle) = take_handle() else {
         return;
     };
-    if handle.shared.enabled {
-        let _ = request_flush(&handle.control, flush_timeout).await;
+    if handle.shared.enabled
+        && !request_flush(&handle.control, flush_timeout).await
+    {
+        tracing::warn!("统计停机前的 flush 未在 {flush_timeout:?} 内完成，队列中可能仍有事件");
     }
     handle.shared.stopping.store(true, Ordering::Release);
     let _ = handle.control.try_send(Control::Shutdown);
@@ -405,6 +465,7 @@ pub async fn shutdown(flush_timeout: Duration) {
         if thread.is_finished() {
             let _ = thread.join();
         } else {
+            ORPHANED.store(true, Ordering::Release);
             tracing::warn!("统计写入线程未在 {JOIN_TIMEOUT:?} 内退出");
             drop(thread);
         }
@@ -419,6 +480,25 @@ pub fn shutdown_blocking(timeout: Duration) {
     let Some(handle) = take_handle() else {
         return;
     };
+    if handle.shared.enabled {
+        // Drop cannot await: poll one bounded flush, then keep shutting down.
+        let (ack, mut flushed) = oneshot::channel();
+        if handle.control.try_send(Control::Flush(ack)).is_err() {
+            tracing::warn!("Drop 停机前无法提交统计 flush：控制队列忙");
+        } else {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                match flushed.try_recv() {
+                    Ok(_) => break,
+                    Err(_) if std::time::Instant::now() >= deadline => {
+                        tracing::warn!("Drop 停机前的统计 flush 未在 {timeout:?} 内完成");
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        }
+    }
     handle.shared.stopping.store(true, Ordering::Release);
     let _ = handle.control.try_send(Control::Shutdown);
     drop(handle.control);
@@ -433,6 +513,7 @@ pub fn shutdown_blocking(timeout: Duration) {
         if thread.is_finished() {
             let _ = thread.join();
         } else {
+            ORPHANED.store(true, Ordering::Release);
             tracing::warn!("统计写入线程未在 {timeout:?} 内退出");
             drop(thread);
         }
@@ -443,6 +524,7 @@ pub fn shutdown_blocking(timeout: Duration) {
 fn reset_runtime_state() {
     OPEN_SEQ.store(0, Ordering::Release);
     OPEN_ROOM.store(0, Ordering::Release);
+    ACTIVE_GUARDS.store(0, Ordering::Release);
     BILI_SAMPLE_SECS.store(5, Ordering::Relaxed);
     capture::set_enabled(false);
     live_book::clear();
@@ -531,6 +613,12 @@ fn flush_queued(w: &mut writer::Writer, rx: &mut Receiver<Arc<Event>>, shared: &
     remaining == 0 && shared.dropped.load(Ordering::Relaxed) == 0
 }
 
+/// A relay is open while a guard lives or a sequence is published: either
+/// half alone must be enough to refuse a clear.
+fn relay_in_progress() -> bool {
+    OPEN_SEQ.load(Ordering::Acquire) != 0 || ACTIVE_GUARDS.load(Ordering::Acquire) != 0
+}
+
 /// Commits what is already queued, then deletes it, so a sample captured just
 /// before the request cannot reappear in the fresh archive. Running this only
 /// while no relay is open keeps the writer's cached session ids harmless; the
@@ -592,7 +680,7 @@ pub(crate) fn run_writer(
                             let _ = ack.send(flush_queued(&mut w, &mut rx, &shared));
                         }
                         Control::Clear(ack) => {
-                            let open = OPEN_SEQ.load(Ordering::Acquire) != 0;
+                            let open = relay_in_progress();
                             let _ = ack.send(clear_rows(&mut w, &mut rx, &shared, open));
                         }
                     }
@@ -755,6 +843,9 @@ impl SessionGuard {
             area_v2,
             room,
         });
+        // Publish the guard before the sequence: a clear racing this start
+        // sees at least one of the two halves and refuses.
+        ACTIVE_GUARDS.fetch_add(1, Ordering::AcqRel);
         OPEN_SEQ.store(0, Ordering::Release);
         OPEN_ROOM.store(room, Ordering::Release);
         OPEN_SEQ.store(seq, Ordering::Release);
@@ -823,6 +914,18 @@ impl SessionGuard {
     fn end(&mut self, reason: EndReason) {
         if !self.done {
             self.done = true;
+            let mut live = ACTIVE_GUARDS.load(Ordering::Acquire);
+            while live > 0 {
+                match ACTIVE_GUARDS.compare_exchange_weak(
+                    live,
+                    live - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => live = actual,
+                }
+            }
             let _ = OPEN_SEQ.compare_exchange(self.seq, 0, Ordering::Relaxed, Ordering::Relaxed);
             emit(EventKind::SessionEnded {
                 seq: self.seq,
