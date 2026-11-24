@@ -38,21 +38,19 @@ pub async fn check_setup() -> Result<Json<SetupStatus>, StatusCode> {
             }));
         }
     };
-    let mut missing_files = Vec::new();
-    if store
-        .revision("config.json")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .is_none()
-    {
-        missing_files.push("config.json".into());
-    }
-    if store
-        .revision("cookies.json")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .is_none()
-    {
-        missing_files.push("cookies.json".into());
-    }
+    let missing_files = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
+        let mut missing_files = Vec::new();
+        if store.revision("config.json")?.is_none() {
+            missing_files.push("config.json".into());
+        }
+        if store.revision("cookies.json")?.is_none() {
+            missing_files.push("cookies.json".into());
+        }
+        Ok(missing_files)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let needs_setup = !missing_files.is_empty();
 
@@ -284,8 +282,10 @@ pub(crate) async fn save_setup_config(
         Ok(channels) => channels,
         Err(error) => return Ok(invalid(error)),
     };
-    let new_install =
-        !crate::storage::contains("config.json").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let new_install = !tokio::task::spawn_blocking(|| crate::storage::contains("config.json"))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut cfg = if let Ok(existing_cfg) = crate::config::load_config().await {
         existing_cfg
     } else {

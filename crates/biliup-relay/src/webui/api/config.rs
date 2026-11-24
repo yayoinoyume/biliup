@@ -21,7 +21,11 @@ pub async fn get_config() -> Result<Json<serde_json::Value>, StatusCode> {
     let cfg = load_config()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(config_response(&cfg)))
+    // 名单目录要读存储：整段投影放到阻塞线程，绝不占用 tokio worker。
+    let response = tokio::task::spawn_blocking(move || config_response(&cfg))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(response))
 }
 
 fn credential_mask(value: &str) -> String {
@@ -838,8 +842,12 @@ pub async fn update_config(
         || payload.warning_hold_exempt_all_low_risk.is_some()
     {
         if let Some(entries) = payload.warning_hold_exempt.take() {
-            let roster =
-                crate::config::load_channels().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let roster = tokio::task::spawn_blocking(|| {
+                crate::config::load_channels().map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             match validated_exempt_channels(entries, &roster) {
                 Ok(entries) => cfg.warning_hold_exempt = entries,
                 Err(message) => return Ok(edit_refusal(message)),

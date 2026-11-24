@@ -50,11 +50,19 @@ fn storage_response<T: Serialize>(result: io::Result<T>, message: &str) -> Respo
 }
 
 pub async fn storage_status() -> Json<serde_json::Value> {
-    let result = tokio::task::spawn_blocking(crate::storage::global).await;
+    let result =
+        tokio::task::spawn_blocking(|| -> io::Result<serde_json::Value> {
+            let store = crate::storage::global()?;
+            Ok(json!({
+                "ready": true,
+                "schema": 1,
+                "sqlite_version": rusqlite::version(),
+                "configured": store.revision("config.json")?.is_some(),
+            }))
+        })
+        .await;
     match result {
-        Ok(Ok(store)) => Json(
-            json!({"ready":true,"schema":1,"sqlite_version":rusqlite::version(),"configured":store.revision("config.json").ok().flatten().is_some()}),
-        ),
+        Ok(Ok(value)) => Json(value),
         Ok(Err(error)) => Json(json!({"ready":false,"message":error.to_string()})),
         Err(_) => Json(json!({"ready":false,"message":"数据存储暂不可用"})),
     }
@@ -215,6 +223,15 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// 断言失败时也要关掉全局句柄，否则它指向已删除的临时目录。
+    struct StoreShutdown;
+
+    impl Drop for StoreShutdown {
+        fn drop(&mut self) {
+            crate::storage::shutdown();
+        }
+    }
+
     #[tokio::test]
     async fn restore_rejects_oversized_payload_before_decoding() {
         let payload = RestoreRequest {
@@ -235,6 +252,7 @@ mod tests {
         let _guard = crate::storage::lock_test_global();
         let dir = tempfile::tempdir().unwrap();
         let _store = init_store(&dir);
+        let _shutdown = StoreShutdown;
         let password = "synthetic-backup-password";
 
         let export = export_storage_backup(JsonBody(BackupRequest {
@@ -275,8 +293,6 @@ mod tests {
             seen.contains(&crate::webui::events::CONFIG),
             "恢复成功后必须广播配置变更：{seen:?}"
         );
-
-        crate::storage::shutdown();
     }
 
     #[tokio::test]
@@ -284,6 +300,7 @@ mod tests {
         let _guard = crate::storage::lock_test_global();
         let dir = tempfile::tempdir().unwrap();
         let _store = init_store(&dir);
+        let _shutdown = StoreShutdown;
 
         let oversized = save_player_filter(JsonBody(CookieImport {
             content: "a".repeat(MAX_PLAYER_FILTER_BYTES + 1),
@@ -316,8 +333,6 @@ mod tests {
         let value = body_json(get_player_filter().await).await;
         assert_eq!(value["data"]["content"], "屏蔽词");
         assert_eq!(value["data"]["revision"], 1);
-
-        crate::storage::shutdown();
     }
 
     #[tokio::test]
@@ -325,6 +340,7 @@ mod tests {
         let _guard = crate::storage::lock_test_global();
         let dir = tempfile::tempdir().unwrap();
         let _store = init_store(&dir);
+        let _shutdown = StoreShutdown;
         const JAR: &str = "# Netscape HTTP Cookie File\n#HttpOnly_.example.invalid\tTRUE\t/\tTRUE\t0\tsession\tsynthetic\n";
 
         let imported = import_youtube_cookies(JsonBody(CookieImport {
@@ -366,7 +382,5 @@ mod tests {
             StatusCode::CONFLICT,
             "过期版本号清除必须冲突"
         );
-
-        crate::storage::shutdown();
     }
 }

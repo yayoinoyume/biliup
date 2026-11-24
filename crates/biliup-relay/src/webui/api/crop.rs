@@ -513,7 +513,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn capture_frame_tool_times_out_and_reaps_the_child() {
+    async fn run_tool_times_out_and_reaps_child_process() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();

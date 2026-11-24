@@ -348,10 +348,65 @@ pub async fn push_monitored_config_to_peers(_config: &Config) -> Result<(), Stri
     Ok(())
 }
 
-/// 待 Phase 3 集群弹幕命令运行时同步迁入后替换：单机直接改本地开关。
-pub async fn apply_danmaku_command_runtime_state(_enabled: bool) {}
+/// 待 Phase 3 集群弹幕命令运行时同步迁入后替换：单机直接改本地门闸与客户端。
+pub async fn apply_danmaku_command_runtime_state(enabled: bool) {
+    crate::plugins::enable_danmaku_commands(enabled);
+    if enabled {
+        if !crate::plugins::is_danmaku_running() {
+            crate::plugins::run_danmaku();
+        }
+    } else if crate::plugins::is_danmaku_running() {
+        crate::plugins::stop_danmaku().await;
+    }
+}
 
 /// 待 Phase 3 集群围栏迁入后替换：单机不发围栏承诺，所以能力表不带该字段。
 pub fn membership_fencing_capability() -> Option<serde_json::Value> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 恢复门闸与运行态，断言失败也不把全局状态留给其它测试。
+    struct GateReset {
+        commands_enabled: bool,
+        running: bool,
+    }
+
+    impl Drop for GateReset {
+        fn drop(&mut self) {
+            crate::plugins::set_danmaku_commands_enabled(self.commands_enabled);
+            crate::plugins::set_danmaku_running(self.running);
+            crate::plugins::set_danmaku_stop_signal(false);
+        }
+    }
+
+    /// 只走关闭方向：开启方向会真的启动弹幕客户端线程并联网，单测不得触发。
+    #[tokio::test]
+    async fn apply_danmaku_command_runtime_state_flips_the_gate_and_stops_cleanly_offline() {
+        let _guard = crate::storage::lock_test_global();
+        let _reset = GateReset {
+            commands_enabled: crate::plugins::is_danmaku_commands_enabled(),
+            running: crate::plugins::is_danmaku_running(),
+        };
+        crate::plugins::set_danmaku_running(false);
+        crate::plugins::set_danmaku_commands_enabled(true);
+
+        apply_danmaku_command_runtime_state(false).await;
+
+        assert!(
+            !crate::plugins::is_danmaku_commands_enabled(),
+            "关闭弹幕指令必须立即翻转门闸，不能等下一轮 run_bilistream"
+        );
+        assert!(
+            !crate::plugins::is_danmaku_running(),
+            "关闭路径不得启动弹幕客户端"
+        );
+        assert!(
+            !crate::plugins::should_stop_danmaku(),
+            "没有客户端在跑时不得留下停止信号"
+        );
+    }
 }

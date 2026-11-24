@@ -70,8 +70,17 @@ pub struct AddChannelRequest {
     pub niconico_name: Option<String>,
 }
 
-pub(crate) fn read_managed_document<T: DeserializeOwned>(file_name: &str) -> Result<T, String> {
-    crate::storage::read_document(file_name).map_err(|e| e.to_string())
+pub(crate) async fn read_managed_document<T>(file_name: &str) -> Result<T, String>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    let name = file_name.to_string();
+    // 文档库读取是阻塞 I/O：统一交给阻塞线程池。
+    tokio::task::spawn_blocking(move || {
+        crate::storage::read_document::<T>(&name).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub(crate) async fn mutate_managed_document<T, F>(file_name: &str, edit: F) -> Result<(), String>
@@ -156,7 +165,7 @@ fn normalize_managed_platforms(mut platforms: HashMap<String, String>) -> HashMa
 }
 
 pub async fn get_areas_manage() -> Json<ApiResponse<AreasData>> {
-    match read_managed_document::<AreasData>("areas.json") {
+    match read_managed_document::<AreasData>("areas.json").await {
         Ok(areas) => Json(ApiResponse {
             success: true,
             data: Some(areas),
@@ -191,7 +200,7 @@ pub async fn add_area(Json(payload): Json<AddAreaRequest>) -> Json<ApiResponse<(
 }
 
 pub async fn get_channels_manage() -> Json<ApiResponse<ChannelsData>> {
-    match read_managed_document::<ChannelsData>("channels.json") {
+    match read_managed_document::<ChannelsData>("channels.json").await {
         Ok(channels) => Json(ApiResponse {
             success: true,
             data: Some(channels),
