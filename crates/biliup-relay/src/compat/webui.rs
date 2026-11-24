@@ -57,6 +57,20 @@ pub mod state {
 pub mod stream_list {
     /// 待 Phase 2 流列表唤醒迁入后替换。
     pub fn wake() {}
+
+    /// 待 Phase 2 流列表租约迁入后替换；单机没有面板在读列表，名册按需跳过。
+    pub fn any_leased() -> bool {
+        false
+    }
+}
+
+pub mod listen {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    /// 待 Phase 2 Web 监听迁入后替换；单机 WebSub 回调只绑回环。
+    pub fn listen_bind() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    }
 }
 
 pub mod public {

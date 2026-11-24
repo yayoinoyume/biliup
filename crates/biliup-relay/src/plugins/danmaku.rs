@@ -2,8 +2,8 @@
 pub(crate) mod warning;
 
 use self::warning::{warning_tracker, BroadcastSource, WarningReleaseReason};
-use crate::compat::sources::twitch::get_twitch_status;
-use crate::compat::sources::youtube::{get_youtube_area_topic, get_youtube_status};
+use crate::plugins::twitch::get_twitch_status;
+use crate::plugins::youtube::{get_youtube_area_topic, get_youtube_status};
 use crate::compat::cluster::{monitored_config_version, sync_monitored_config_after_change};
 use crate::config::{load_config, save_config, Config};
 use crate::logging::{safe_diagnostic, safe_text};
@@ -1342,7 +1342,7 @@ pub(crate) fn configured_broadcast_source(cfg: &Config, platform: &str) -> Optio
         )),
         "NC" => {
             let (channel_id, channel_name) =
-                crate::compat::sources::niconico_channel_identity(&cfg.niconico);
+                crate::plugins::niconico::niconico_channel_identity(&cfg.niconico);
             Some(BroadcastSource::new("NC", &channel_name, &channel_id, None))
         }
         _ => None,

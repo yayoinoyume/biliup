@@ -368,7 +368,7 @@ impl Store {
         let cache = Arc::new(RwLock::new(load_rows(&connection, &key, &id)?));
         let runtime_dir = data_dir.join("runtime");
         paths::private_dir(&runtime_dir)?;
-        crate::compat::youtube_cookies::cleanup_stale(&runtime_dir);
+        crate::plugins::youtube_cookies::cleanup_stale(&runtime_dir);
         let (sender, receiver) = mpsc::sync_channel::<Job>(32);
         let worker_cache = Arc::clone(&cache);
         let worker = std::thread::Builder::new()
@@ -678,7 +678,10 @@ pub fn init(data_dir: &Path, key_file: Option<&Path>) -> io::Result<Arc<Store>> 
         .map_err(|_| io::Error::other("数据库初始化不可用"))?
         .as_ref()
     {
-        if registered == &data && registered_key == &key {
+        // 同一条物理路径的不同拼写（软链、..）不该被当成换库，也不该报实例锁冲突。
+        let same_data = normalize_for_check(registered)? == normalize_for_check(&data)?;
+        let same_key = normalize_for_check(registered_key)? == normalize_for_check(&key)?;
+        if same_data && same_key {
             if let Some(store) = GLOBAL
                 .read()
                 .map_err(|_| io::Error::other("数据库初始化不可用"))?

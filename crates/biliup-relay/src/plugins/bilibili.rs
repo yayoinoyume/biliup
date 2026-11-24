@@ -1525,7 +1525,7 @@ pub async fn get_thumbnail(
             );
             return Ok(String::new());
         };
-        match crate::compat::sources::niconico::niconico_cover_thumbnail_url(live_id, proxy_url.as_deref()).await {
+        match crate::plugins::niconico::niconico_cover_thumbnail_url(live_id, proxy_url.as_deref()).await {
             Ok(Some(url)) => url,
             Ok(None) => {
                 warn!("Niconico 节目没有可用的封面缩略图 (live_id={})", live_id);
@@ -1552,7 +1552,7 @@ pub async fn get_thumbnail(
     let mut request = client.get(&thumbnail_url);
     if platform == "NC" {
         request = request
-            .header("User-Agent", crate::compat::sources::niconico::CHANNEL_PAGE_USER_AGENT)
+            .header("User-Agent", crate::plugins::niconico::CHANNEL_PAGE_USER_AGENT)
             .header("Referer", "https://live.nicovideo.jp/")
             .header("Accept", "image/jpeg,image/*,*/*");
     }

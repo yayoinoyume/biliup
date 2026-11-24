@@ -67,7 +67,7 @@ pub(crate) fn validate(name: &str, value: &Value) -> io::Result<()> {
         "cookies.txt" => {
             let text = value.as_str().ok_or_else(bad)?;
             if !text.is_empty() {
-                crate::compat::youtube_cookies::validate_netscape(text).map_err(|_| bad())?;
+                crate::plugins::youtube_cookies::validate_netscape(text).map_err(|_| bad())?;
             }
         }
         "invalid_words.txt" => {

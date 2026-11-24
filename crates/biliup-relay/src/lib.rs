@@ -1,5 +1,8 @@
 pub mod app_state;
 pub mod compat;
+// 阶段替换：C 组插件仍按源仓库的 crate::cluster / crate::webui 路径引用，
+// 这里先指向 compat 薄适配层，Phase 2/5 真实模块迁入后改为直接声明。
+pub(crate) use compat::{cluster, webui};
 pub mod config;
 pub mod credential_bridge;
 pub mod events;

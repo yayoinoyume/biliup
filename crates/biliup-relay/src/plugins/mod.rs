@@ -1,19 +1,43 @@
-//! 通用插件：A 组基础能力 + B 组 B 站直播控制与弹幕客户端。
+//! 通用插件：A 组基础能力 + B 组 B 站直播控制与弹幕客户端 + C 组多平台源检测与发现。
 
 pub mod banned_keywords;
 pub mod bilibili;
 pub(crate) mod channel_id;
 pub(crate) mod danmaku;
 pub(crate) mod danmaku_client;
+pub mod ffmpeg;
+pub mod holodex;
+pub(crate) mod holodex_account;
 pub mod http;
 pub(crate) mod mask_pairing;
+pub mod niconico;
+pub mod niconico_live;
+pub(crate) mod niconico_session;
+pub mod riot;
 pub(crate) mod source_status;
 pub(crate) mod stream_item;
 pub mod subprocess;
+pub mod twitch;
+pub mod twitch_live;
 pub(crate) mod violation_notice;
 pub mod warning_exempt;
 pub mod wbi;
+pub mod youtube;
+pub(crate) mod youtube_channel;
+pub mod youtube_cookies;
+pub mod youtube_data;
+pub mod youtube_discovery;
+pub mod youtube_hours;
+pub mod youtube_index;
+pub mod youtube_websub;
 
 pub use bilibili::*;
 pub use danmaku::*;
 pub use danmaku_client::*;
+pub use ffmpeg::*;
+pub use holodex::*;
+pub use niconico::*;
+pub use riot::*;
+pub use stream_item::*;
+pub use twitch::*;
+pub use youtube::*;

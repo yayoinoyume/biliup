@@ -1,19 +1,16 @@
 //! 薄适配边界：为尚未迁入本 crate 的模块提供最小实现。
 //!
 //! 每个子模块只保留已迁入代码真正调用到的那一小撮 API，行为尽量保持真实
-//! （监听地址校验、Netscape Cookie 格式校验、B 站汇总解析都是真的），不写空过假校验。
+//! （监听地址校验、单机集群角色、面板租约都是真的），不写空过假校验。
 //! 替换时机：
 //! - `webui`：Phase 2 Web 服务迁入后删除；
 //! - `cluster`：Phase 2 集群同步迁入后删除；
 //! - `history`：Phase 2 统计历史迁入后删除；
 //! - `notify`：Phase 4 通知迁入后删除；
-//! - `sources`：P1-03 C 组插件迁入后删除；
-//! - `youtube_cookies` / `priority`：Phase 2 对应插件迁入后删除。
+//! - `priority`：Phase 2 对应插件迁入后删除。
 
 pub(crate) mod cluster;
 pub(crate) mod history;
 pub(crate) mod notify;
 pub(crate) mod priority;
-pub(crate) mod sources;
 pub(crate) mod webui;
-pub(crate) mod youtube_cookies;
