@@ -82,24 +82,57 @@ async fn stop_and_assert_released(
     );
 }
 
-fn home_key_files() -> Vec<String> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
-    };
-    let dir = std::path::PathBuf::from(home)
-        .join(".config")
-        .join("bilistream")
-        .join("keys");
-    let mut names = std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
+struct KeyFileEnv(Option<std::ffi::OsString>);
+
+impl KeyFileEnv {
+    fn set(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os("BILISTREAM_KEY_FILE");
+        unsafe { std::env::set_var("BILISTREAM_KEY_FILE", path) };
+        Self(previous)
+    }
+}
+
+impl Drop for KeyFileEnv {
+    fn drop(&mut self) {
+        unsafe {
+            match self.0.take() {
+                Some(value) => std::env::set_var("BILISTREAM_KEY_FILE", value),
+                None => std::env::remove_var("BILISTREAM_KEY_FILE"),
+            }
+        }
+    }
+}
+
+fn key_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        dirs.push(
+            std::path::PathBuf::from(xdg)
+                .join("bilistream")
+                .join("keys"),
+        );
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let dir = std::path::PathBuf::from(home)
+            .join(".config")
+            .join("bilistream")
+            .join("keys");
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+fn home_key_files() -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for dir in key_dirs() {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            files.push(entry.path());
+        }
+    }
+    files.sort();
+    files
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -108,7 +141,7 @@ async fn relay_health_is_ready_behind_optional_auth() {
     let key_dir = tempfile::tempdir().unwrap();
     let key_file = key_dir.path().join("master.key");
     let home_keys_before = home_key_files();
-    unsafe { std::env::set_var("BILISTREAM_KEY_FILE", &key_file) };
+    let _key_env = KeyFileEnv::set(&key_file);
 
     let open_dir = tempfile::tempdir().unwrap();
     let (port, stop, task) = spawn_server(false, open_dir.path(), &logging);

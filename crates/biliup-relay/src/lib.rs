@@ -121,16 +121,19 @@ impl RelayService {
     }
 
     pub async fn shutdown(&self) {
-        {
+        let held = {
             let mut inner = lock(&self.inner);
             if inner.storage.is_none() && inner.state == STATE_STOPPED {
                 return;
             }
-            inner.storage = None;
+            let held = inner.storage.take().is_some();
             inner.ready = false;
             inner.state = String::from(STATE_STOPPED);
+            held
+        };
+        if held {
+            storage::shutdown();
         }
-        storage::shutdown();
     }
 }
 

@@ -628,25 +628,33 @@ static INITIALIZING: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 pub(crate) static TEST_STORE_LOCK: Mutex<()> = Mutex::new(());
 
-fn canonical_for_check(path: &Path) -> Option<PathBuf> {
-    if path.exists() {
-        return path.canonicalize().ok();
+/// 解析真实路径：先 canonicalize 最近存在的祖先，再折叠尾部尚不存在的组件。
+/// 父目录尚未创建时也不能跳过软链与 `..` 校验。
+fn normalize_for_check(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let existing = absolute
+        .ancestors()
+        .find(|candidate| candidate.symlink_metadata().is_ok())
+        .ok_or_else(|| io::Error::other("密钥路径无法解析"))?;
+    let mut normalized = existing.canonicalize()?;
+    let tail = absolute.strip_prefix(existing).unwrap_or(Path::new(""));
+    for component in tail.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(name) => normalized.push(name),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {}
+        }
     }
-    let parent = path.parent()?.canonicalize().ok()?;
-    Some(parent.join(path.file_name()?))
+    Ok(normalized)
 }
 
-/// 词法路径加真实路径双重校验，软链不能把密钥带进数据目录。
+/// 词法路径加真实路径双重校验，软链与 `..` 都不能把密钥带进数据目录。
 fn validate_key_location(data_dir: &Path, key_file: &Path) -> io::Result<()> {
-    let data = std::path::absolute(data_dir)?;
-    let key = std::path::absolute(key_file)?;
-    if key.starts_with(&data) {
+    if normalize_for_check(key_file)?.starts_with(normalize_for_check(data_dir)?) {
         return Err(invalid("密钥文件必须在数据库目录之外"));
-    }
-    if let (Some(data), Some(key)) = (canonical_for_check(&data), canonical_for_check(&key)) {
-        if key.starts_with(&data) {
-            return Err(invalid("密钥文件必须在数据库目录之外"));
-        }
     }
     Ok(())
 }
@@ -680,18 +688,15 @@ pub fn init(data_dir: &Path, key_file: Option<&Path>) -> io::Result<Arc<Store>> 
             }
         }
     }
-    let previous = GLOBAL
-        .write()
-        .map_err(|_| io::Error::other("数据库初始化不可用"))?
-        .take();
-    drop(previous);
     let store = Store::open(data.clone(), key.clone())?;
     *REGISTERED
         .write()
         .map_err(|_| io::Error::other("数据库初始化不可用"))? = Some((data, key));
-    *GLOBAL
+    let previous = GLOBAL
         .write()
-        .map_err(|_| io::Error::other("数据库初始化不可用"))? = Some(Arc::clone(&store));
+        .map_err(|_| io::Error::other("数据库初始化不可用"))?
+        .replace(Arc::clone(&store));
+    drop(previous);
     Ok(store)
 }
 

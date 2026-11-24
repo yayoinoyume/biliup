@@ -216,6 +216,7 @@ pub mod enrich {
     }
 }
 
+#[cfg(test)]
 pub mod schema {
     //! 待 Phase 2 统计库 schema 迁入后替换；当前只建弹幕测试用到的两张表。
     use std::path::Path;
@@ -229,6 +230,7 @@ pub mod schema {
     }
 }
 
+#[cfg(test)]
 pub mod writer {
     //! 待 Phase 2 统计写入线程迁入后替换的最小真实实现。
     //!

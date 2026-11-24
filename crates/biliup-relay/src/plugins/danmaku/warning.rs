@@ -9,6 +9,8 @@ use crate::logging::safe_text;
 use crate::plugins::mask_pairing::PairRole;
 use crate::plugins::warning_exempt::ReasonId;
 
+pub(crate) use crate::plugins::channel_id::canonical_channel_id;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BroadcastSource {
     pub platform: String,
@@ -33,14 +35,6 @@ impl BroadcastSource {
         self.platform == other.platform
             && !self.channel_id.is_empty()
             && self.channel_id == other.channel_id
-    }
-}
-
-pub(crate) fn canonical_channel_id(platform: &str, channel_id: &str) -> String {
-    if platform == "TW" {
-        channel_id.trim().to_ascii_lowercase()
-    } else {
-        channel_id.trim().to_owned()
     }
 }
 

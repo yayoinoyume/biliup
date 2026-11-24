@@ -639,3 +639,37 @@ fn a_legacy_bilistream_database_is_renamed_in_place_and_remains_readable() {
     );
     drop(store);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_missing_subdirectory_cannot_hide_the_data_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&data, outside.join("link")).unwrap();
+    let key = outside.join("link/notyet/master.key");
+    let Err(error) = Store::open(data, key) else {
+        panic!("软链后尚不存在的子目录必须被拒绝");
+    };
+    assert!(
+        error.to_string().contains("密钥文件必须在数据库目录之外"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_parent_dir_component_cannot_be_folded_into_the_data_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let key = dir.path().join("nope").join("..").join("data").join("master.key");
+    let Err(error) = Store::open(data, key) else {
+        panic!(".. 折叠后落入数据目录必须被拒绝");
+    };
+    assert!(
+        error.to_string().contains("密钥文件必须在数据库目录之外"),
+        "{error}"
+    );
+}
