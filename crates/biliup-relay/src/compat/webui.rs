@@ -26,7 +26,7 @@ pub mod api {
     use super::state::NetworkStatus;
 
     /// 本地推流器的实时网络指标快照；没有本地推流时返回空快照。
-    pub async fn current_network_status() -> NetworkStatus {
+    pub(crate) async fn current_network_status() -> NetworkStatus {
         // A live room may be fed by another node. Zero progress is also valid for
         // a stalled local publisher, so metrics alone cannot indicate ownership.
         if !crate::plugins::is_ffmpeg_running().await {

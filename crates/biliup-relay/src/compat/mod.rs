@@ -11,4 +11,4 @@
 pub(crate) mod cluster;
 pub(crate) mod history;
 pub(crate) mod notify;
-pub mod webui;
+pub(crate) mod webui;

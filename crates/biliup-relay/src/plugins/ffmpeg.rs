@@ -907,6 +907,33 @@ pub async fn is_ffmpeg_running() -> bool {
     supervisor.is_some()
 }
 
+/// 自检与集成测试用：登记一个真实本地占位子进程，让 `is_ffmpeg_running()` 成立。
+///
+/// 只登记进程（`stop_ffmpeg()` 会按正常路径终止并回收它），不建立任何连接，
+/// 也不启动 reader/统计任务。返回子进程 PID。
+#[doc(hidden)]
+pub async fn track_local_publisher_for_test() -> std::io::Result<u32> {
+    let mut command = Command::new("sleep");
+    command.arg("1000").kill_on_drop(true);
+    let child = FFMPEG_SUPERVISOR.spawn(&mut command)?;
+    let pid = child.id();
+    let session = FfmpegSession { run: 0, ordinal: 0 };
+    let identity = FfmpegStreamIdentity::new("local", "YT", "本地占位频道", "local-placeholder");
+    let context = SessionLogContext::new(identity, session);
+    let log = ChildLogContext::new(&context, ChildRole::Ffmpeg(FfmpegStatsRole::Push), pid);
+    *FFMPEG_SUPERVISOR.lock().await = Some(FfmpegProcess {
+        session,
+        log: context,
+        tasks: SessionTasks::default(),
+        children: vec![FfmpegChild { child, log }],
+        ingest: None,
+        pid,
+        cache_dir: None,
+        _warning_owner: None,
+    });
+    Ok(pid.unwrap_or_default())
+}
+
 // Check if ffmpeg was stopped manually
 pub fn was_manual_stop() -> bool {
     MANUAL_STOP.load(Ordering::SeqCst)

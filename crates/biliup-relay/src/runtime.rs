@@ -47,6 +47,9 @@ pub(crate) async fn graceful_shutdown() {
 fn init_logger() {}
 
 /// 按终端显示宽度折行，替代上游依赖的文本折行库。
+///
+/// 宽度按 Unicode 显示宽度逐字符累加；换行符切行，其余控制字符（含制表符）保持原样。
+/// 单个字符比可用宽度还宽时独占一行而不被截断，宽度下限为 1，因此不会死循环。
 fn wrap_display_width(text: &str, max_width: usize) -> Vec<String> {
     let max_width = max_width.max(1);
     let mut lines: Vec<String> = Vec::new();
@@ -73,6 +76,34 @@ fn wrap_display_width(text: &str, max_width: usize) -> Vec<String> {
         lines.pop();
     }
     lines
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::wrap_display_width;
+
+    #[test]
+    fn zero_and_one_column_widths_still_terminate_without_dropping_text() {
+        assert!(wrap_display_width("", 0).is_empty());
+        assert_eq!(wrap_display_width("ab", 0), vec!["a", "b"]);
+        assert_eq!(wrap_display_width("示例", 1), vec!["示", "例"]);
+        assert_eq!(wrap_display_width("a😀", 1), vec!["a", "😀"]);
+    }
+
+    #[test]
+    fn wrapping_counts_display_width_per_character() {
+        assert_eq!(wrap_display_width("示例频道", 4), vec!["示例", "频道"]);
+        assert_eq!(wrap_display_width("ab", 4), vec!["ab"]);
+        assert_eq!(wrap_display_width("示例", 2), vec!["示", "例"]);
+    }
+
+    #[test]
+    fn newlines_split_lines_and_tabs_stay_in_place() {
+        assert_eq!(wrap_display_width("a\nb", 8), vec!["a", "b"]);
+        assert_eq!(wrap_display_width("a\tb", 8), vec!["a\tb"]);
+        assert_eq!(wrap_display_width("a\n", 8), vec!["a"]);
+        assert!(wrap_display_width("\n\n", 8).is_empty());
+    }
 }
 
 static NO_LIVE: AtomicBool = AtomicBool::new(false);
