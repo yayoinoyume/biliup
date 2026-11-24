@@ -17,6 +17,11 @@ pub mod live_events {
     }
 }
 
+/// 待 Phase 4 通知选举迁入后替换：单机永远不是集群的 recorder 角色。
+pub fn is_recorder() -> bool {
+    false
+}
+
 /// 运行时选中该源且 B 站直播间在线：开播或会话内换台；QQ 机器人消费待 Phase 4。
 pub fn live_source(info: live_events::LiveSource) {
     crate::events::emit(EventKind::BroadcastStarted {

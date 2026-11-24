@@ -332,7 +332,7 @@ pub fn announce_room_lock(room: i32, lock: &BiliRoomLock) {
         return;
     }
     tracing::error!("{}", room_lock_log_line(room, lock));
-    crate::compat::history::emit(crate::compat::history::EventKind::RoomLocked {
+    crate::history::emit(crate::history::EventKind::RoomLocked {
         room: room.max(0) as u64,
         until: lock.lock_till,
     });
@@ -392,7 +392,7 @@ fn observe_live_status_reply(room: i32, reply: &Value, observed_at: u64) {
         Some(0 | 2) => false,
         _ => return,
     };
-    crate::compat::history::bili::observe_room_status_at(room.max(0) as u64, live, observed_at);
+    crate::history::bili::observe_room_status_at(room.max(0) as u64, live, observed_at);
 }
 
 async fn bili_live_status_url(
@@ -418,7 +418,7 @@ async fn bili_live_status_url(
 ///
 /// * `Result<(), Box<dyn Error>>` - Returns `Ok` if successful, otherwise an error.
 pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<dyn Error>> {
-    let seq = crate::compat::history::open_session_seq(cfg.bililive.room.max(0) as u64);
+    let seq = crate::history::open_session_seq(cfg.bililive.room.max(0) as u64);
     let result = bili_start_live_inner(cfg, area_v2).await;
     record_start_live_outcome(seq, &result);
     result
@@ -426,7 +426,7 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
 
 fn record_start_live_outcome(seq: Option<u64>, result: &Result<(), Box<dyn Error>>) {
     if let Err(error) = result {
-        crate::compat::history::emit(crate::compat::history::EventKind::BiliStartFailed {
+        crate::history::emit(crate::history::EventKind::BiliStartFailed {
             seq,
             error: crate::logging::safe_diagnostic(&error.to_string()),
         });
@@ -572,9 +572,9 @@ async fn bili_start_live_inner(cfg: &mut Config, area_v2: u64) -> Result<(), Box
     if response["code"].as_i64() == Some(0) {
         // Even when startLive omits its key, remember this live transition
         // before the relay's asynchronous GetInfo fallback captures it.
-        crate::compat::history::bili::observe_room_status(cfg.bililive.room.max(0) as u64, true);
-        if let Some(key) = crate::compat::history::enrich::parse_live_key(&response["data"]["live_key"]) {
-            crate::compat::history::on_bili_started(cfg, &key);
+        crate::history::bili::observe_room_status(cfg.bililive.room.max(0) as u64, true);
+        if let Some(key) = crate::history::enrich::parse_live_key(&response["data"]["live_key"]) {
+            crate::history::on_bili_started(cfg, &key);
         }
     }
 
@@ -688,7 +688,7 @@ pub async fn bili_stop_live(cfg: &Config) -> Result<(), Box<dyn Error>> {
     });
     crate::compat::webui::state::request_status_refresh();
 
-    crate::compat::history::on_bili_stopped(cfg);
+    crate::history::on_bili_stopped(cfg);
     Ok(())
 }
 
@@ -756,7 +756,7 @@ pub(crate) async fn bili_room_info(cfg: &Config) -> Result<Value, String> {
 /// Error classes deliberately omit the URL, cookie, response and live key.
 async fn history_json(request: reqwest::RequestBuilder) -> Result<Value, String> {
     let response = request
-        .timeout(crate::compat::history::enrich::FETCH_TIMEOUT)
+        .timeout(crate::history::enrich::FETCH_TIMEOUT)
         .send()
         .await
         .map_err(safe_fetch_error)?
@@ -1696,7 +1696,7 @@ mod tests {
         let event = receiver.try_recv().unwrap();
         assert!(matches!(
             &event.kind,
-            crate::compat::history::EventKind::BiliStartFailed { seq: Some(7), error }
+            crate::history::EventKind::BiliStartFailed { seq: Some(7), error }
                 if error.contains("request failed") && !error.contains("SYNTHETIC")
         ));
         assert!(receiver.try_recv().is_err());
@@ -1741,14 +1741,14 @@ mod tests {
         });
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("http://{address}/summary?live_key=SYNTHETIC-KEY");
-        let totals = crate::compat::history::enrich::fetch_with_retry_guarded(
+        let totals = crate::history::enrich::fetch_with_retry_guarded(
             || history_json(client.get(&url)),
             Duration::ZERO,
             Duration::from_millis(1),
             || true,
         )
         .await;
-        let crate::compat::history::enrich::FetchResult::Finished(Some(totals)) = totals else {
+        let crate::history::enrich::FetchResult::Finished(Some(totals)) = totals else {
             panic!("retry did not yield totals");
         };
         assert_eq!(totals.watched_count, Some(469));
@@ -1763,10 +1763,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            crate::compat::history::enrich::parse_room_live_key(&info).as_deref(),
+            crate::history::enrich::parse_room_live_key(&info).as_deref(),
             Some("synthetic-up-session")
         );
-        let safe_info = crate::compat::history::enrich::redact_room_info(&info).to_string();
+        let safe_info = crate::history::enrich::redact_room_info(&info).to_string();
         assert!(!safe_info.contains("synthetic-up-session"));
         assert_eq!(
             serde_json::to_value(totals)

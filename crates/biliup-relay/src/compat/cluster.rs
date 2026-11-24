@@ -82,6 +82,11 @@ pub async fn sync_monitored_config_after_change(_config: &Config) -> String {
     String::new()
 }
 
+/// 待 Phase 5 集群直播簿同步迁入后替换：单机没有对等节点，恒为空。
+pub fn peer_live_books(_node_id: &str) -> Vec<crate::history::live_book::BiliLiveBook> {
+    Vec::new()
+}
+
 /// 单机没有集群：本节点始终可以监控/推流。
 pub fn local_monitoring_allowed(config: &Config) -> bool {
     local_monitoring_block_reason(config).is_none()

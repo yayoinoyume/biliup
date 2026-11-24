@@ -1,0 +1,719 @@
+//! Regression coverage for the completed storage and event contracts.
+
+use super::*;
+use rusqlite::params;
+
+fn flush_shared(path: &std::path::Path) -> std::sync::Arc<crate::history::Shared> {
+    use std::sync::{atomic::AtomicU64, Arc, Mutex};
+    Arc::new(crate::history::Shared {
+        path: path.to_path_buf(),
+        recording_since: T0 as u64,
+        dropped: AtomicU64::new(0),
+        status: Mutex::new(crate::history::WriterStatus {
+            state: "running",
+            ..Default::default()
+        }),
+        cfg: Mutex::new(crate::config::HistoryConfig::default()),
+        enabled: true,
+        secrets: Mutex::new(None),
+        stopping: std::sync::atomic::AtomicBool::new(false),
+    })
+}
+
+#[tokio::test]
+async fn queued_shutdown_facts_are_committed_before_flush_ack_and_reopen() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+    use std::time::Duration;
+    let (w, path) = writer("shutdown-flush");
+    let shared = flush_shared(&path);
+    let bus = crate::events::Bus::new();
+    let data = bus.register("history", 1024, |_| true);
+    bus.seal();
+    bus.emit_at(
+        T0 as u64,
+        EventKind::SessionStarted {
+            seq: 1,
+            platform: "YT",
+            channel_id: "c".into(),
+            channel_name: "n".into(),
+            title: None,
+            live_key: None,
+            source_id: None,
+            area_v2: None,
+            room: 1,
+        },
+    );
+    bus.emit_at(T0 as u64, EventKind::FfmpegStarted { seq: 1, run: 10 });
+    for n in 0..500 {
+        bus.emit_at(
+            (T0 + n) as u64,
+            EventKind::LocalFault {
+                reason: "queued".into(),
+                latched: false,
+            },
+        );
+    }
+    bus.emit_at(
+        (T0 + 600) as u64,
+        EventKind::SessionEnded {
+            seq: 1,
+            reason: EndReason::SourceEnded,
+        },
+    );
+    let (flush, controls) = tokio::sync::mpsc::channel(1);
+    let (ack, mut received) = tokio::sync::oneshot::channel();
+    flush.try_send(crate::history::Control::Flush(ack)).unwrap();
+    // Pause the real writer at its first transaction. Prequeueing the flush
+    // makes an implementation which acknowledges before draining observable:
+    // it would acknowledge first, then enter this transaction via its normal
+    // loop. No scheduler delay or post-shutdown draining can hide that bug.
+    let (entered, transaction_started) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    let mut entered = Some(entered);
+    w.conn
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Begin
+                }
+            ) {
+                if let Some(entered) = entered.take() {
+                    let _ = entered.send(());
+                    let _ = resumed.recv_timeout(Duration::from_secs(2));
+                }
+            }
+            Authorization::Allow
+        }));
+    let worker =
+        std::thread::spawn(move || crate::history::run_writer(w, data, controls, shared, false));
+    tokio::time::timeout(Duration::from_secs(1), transaction_started)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        received.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    resume.send(()).unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(2), received)
+        .await
+        .unwrap()
+        .unwrap());
+    let read = schema::open_ro(&path).unwrap();
+    assert_eq!(
+        read.query_row("SELECT count(*) FROM events", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        500,
+        "the entire queued prefix is committed before acknowledgement"
+    );
+    assert_eq!(
+        read.query_row("SELECT ended_at FROM sessions", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        T0 + 600
+    );
+    drop(read);
+    drop(bus);
+    drop(flush);
+    // run_writer hands the bus receiver back for the next start.
+    let _parked = tokio::task::spawn_blocking(move || worker.join())
+        .await
+        .unwrap()
+        .unwrap();
+    let conn = schema::open_rw(&path).unwrap();
+    let mut next = Writer::new(conn, "local", 8);
+    next.apply(&ev(
+        T0 + 601,
+        EventKind::ProcessStarted {
+            version: "reopened",
+        },
+    ))
+    .unwrap();
+    let (end, reason): (i64, String) = next
+        .conn
+        .query_row("SELECT ended_at,end_reason FROM sessions", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((end, reason.as_str()), (T0 + 600, "source_ended"));
+    assert_eq!(count(&next, "events"), 500);
+    assert_eq!(
+        next.conn
+            .query_row("SELECT ended_at FROM runs", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        T0 + 600
+    );
+}
+
+#[tokio::test]
+async fn failed_or_closed_writer_never_acknowledges_a_successful_flush() {
+    use std::sync::{atomic::Ordering, Arc};
+    use std::time::Duration;
+    let (w, path) = writer("failed-shutdown-flush");
+    w.conn
+        .execute_batch("CREATE TRIGGER fail_flush BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'injected history write failure'); END;")
+        .unwrap();
+    let shared = flush_shared(&path);
+    let observed = Arc::clone(&shared);
+    let bus = crate::events::Bus::new();
+    let data = bus.register("history", 1024, |_| true);
+    bus.seal();
+    bus.emit_at(
+        T0 as u64,
+        EventKind::LocalFault {
+            reason: "queued".into(),
+            latched: false,
+        },
+    );
+    let (flush, controls) = tokio::sync::mpsc::channel(1);
+    let (ack, received) = tokio::sync::oneshot::channel();
+    flush.try_send(crate::history::Control::Flush(ack)).unwrap();
+    let worker =
+        std::thread::spawn(move || crate::history::run_writer(w, data, controls, shared, false));
+    assert!(!tokio::time::timeout(Duration::from_secs(2), received)
+        .await
+        .unwrap()
+        .unwrap());
+    assert_eq!(observed.dropped.load(Ordering::Relaxed), 1);
+    assert_eq!(observed.status.lock().unwrap().state, "error");
+    assert!(!crate::history::request_flush(&flush, Duration::from_secs(2)).await);
+    let read = schema::open_ro(&path).unwrap();
+    assert_eq!(
+        read.query_row("SELECT count(*) FROM events", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "failed flush rolls back its rows"
+    );
+    drop(read);
+    drop(bus);
+    // run_writer hands the bus receiver back for the next start.
+    let _parked = tokio::task::spawn_blocking(move || worker.join())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!crate::history::request_flush(&flush, Duration::from_secs(2)).await);
+}
+
+#[tokio::test]
+async fn stalled_writer_flush_times_out_without_blocking_the_other_consumer() {
+    use std::time::Duration;
+    let bus = crate::events::Bus::new();
+    let _stalled = bus.register("history", 1, |_| true);
+    let mut notify = bus.register("notify", 2, |_| true);
+    bus.seal();
+    bus.emit_at(1, EventKind::QuorumChanged { has_quorum: true });
+    assert_eq!(notify.try_recv().unwrap().at, 1);
+    // The writer holds its control receiver but deliberately never polls it.
+    let (flush, _controls) = tokio::sync::mpsc::channel(1);
+    let waiter = tokio::spawn(async move {
+        crate::history::request_flush(&flush, Duration::from_millis(25)).await
+    });
+    tokio::task::yield_now().await;
+    bus.emit_at(2, EventKind::QuorumChanged { has_quorum: false });
+    assert_eq!(notify.try_recv().unwrap().at, 2);
+    assert!(!tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .unwrap()
+        .unwrap());
+    assert_eq!(
+        bus.dropped(),
+        vec![("unsealed", 0), ("history", 1), ("notify", 0)]
+    );
+}
+
+#[test]
+fn compact_frames_keep_independent_metrics_and_session_identity() {
+    let (w, _) = writer("compact-frame");
+    for (metric, sid, min, max, sum, count) in [
+        (1, 1, 1.25, 2.75, 4.0, 2),
+        (1, 1, 0.5, 5.5, 6.0, 2),
+        (2, 1, 60.0, 60.0, 60.0, 1),
+        (1, 2, 99.0, 99.0, 99.0, 1),
+    ] {
+        w.conn.execute("INSERT INTO samples_raw(metric,node,ts,session_id,min,max,sum,count) VALUES(?1,'local',?2,?3,?4,?5,?6,?7)",params![metric,T0,sid,min,max,sum,count]).unwrap();
+    }
+    let a: (f64, f64, f64, i64) = w
+        .conn
+        .query_row(
+            "SELECT min,max,sum,count FROM samples_raw WHERE metric=1 AND session_id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(a, (0.5, 5.5, 10.0, 4));
+    assert_eq!(count(&w, "sample_frames"), 2);
+    assert_eq!(count(&w, "samples_raw"), 3);
+    w.conn
+        .execute(
+            "DELETE FROM samples_raw WHERE metric=1 AND session_id=1",
+            [],
+        )
+        .unwrap();
+    assert_eq!(count(&w, "samples_raw"), 2);
+    assert_eq!(count(&w, "sample_frames"), 2);
+}
+
+#[test]
+fn newer_schema_is_refused_without_replacing_existing_history() {
+    let (w, path) = writer("newer-schema");
+    w.conn
+        .pragma_update(None, "user_version", schema::SCHEMA_VERSION + 1)
+        .unwrap();
+    drop(w);
+    let before = std::fs::read(&path).unwrap();
+    assert!(schema::open_rw(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!path.with_extension("sqlite.corrupt").exists());
+}
+
+#[test]
+fn failed_batch_rolls_back_rows_and_writer_identity_maps() {
+    let (mut w, _) = writer("atomic-batch");
+    w.conn.execute_batch("CREATE TRIGGER fail_event BEFORE INSERT ON events WHEN NEW.kind='cluster.quorum' BEGIN SELECT RAISE(ABORT,'injected write failure'); END;").unwrap();
+    let start = ev(
+        T0,
+        EventKind::SessionStarted {
+            seq: 1,
+            platform: "YT",
+            channel_id: "c".into(),
+            channel_name: "n".into(),
+            title: None,
+            live_key: None,
+            source_id: None,
+            area_v2: None,
+            room: 1,
+        },
+    );
+    let run = ev(T0, EventKind::FfmpegStarted { seq: 1, run: 10 });
+    let rejected = ev(T0, EventKind::QuorumChanged { has_quorum: false });
+    assert!(w.commit(&[start.clone(), run.clone(), rejected]).is_err());
+    assert_eq!(count(&w, "sessions"), 0);
+    assert_eq!(count(&w, "runs"), 0);
+    w.commit(&[start, run]).unwrap();
+    let (id, eid, runs): (i64, String, i64) = w
+        .conn
+        .query_row("SELECT id,eid,runs FROM sessions", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap();
+    assert_eq!((id, eid.as_str(), runs), (1, "local:7:1", 1));
+    end(&mut w, 1, T0 + 10, EndReason::SourceEnded);
+    assert_eq!(sessions(&w, T0 + 20).items[0].duration_secs, 10);
+}
+
+#[test]
+fn delayed_counts_use_captured_session_and_late_samples_update_one_rollup() {
+    let (mut w, _) = writer("late-capture");
+    let base = T0.div_euclid(60) * 60;
+    session(&mut w, 1, base, None);
+    w.commit(&[ev(
+        base + 10,
+        EventKind::StatsSample {
+            seq: 1,
+            bitrate_kbps: (90.0, 100.0, 110.0),
+            fps: None,
+            speed: None,
+        },
+    )])
+    .unwrap();
+    maintain::rollup_1m(&w.conn, base + 600).unwrap();
+    w.commit(&[ev(
+        base + 15,
+        EventKind::StatsSample {
+            seq: 1,
+            bitrate_kbps: (180.0, 200.0, 220.0),
+            fps: None,
+            speed: None,
+        },
+    )])
+    .unwrap();
+    maintain::rollup_1m(&w.conn, base + 660).unwrap();
+    let accum: (f64, f64, f64, i64) = w
+        .conn
+        .query_row(
+            "SELECT min,max,sum,count FROM samples_1m WHERE metric=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(accum, (90.0, 220.0, 300.0, 2));
+    end(&mut w, 1, base + 30, EndReason::SourceEnded);
+    session(&mut w, 2, base + 30, None);
+    w.commit(&[
+        ev(
+            base + 20,
+            EventKind::BiliCounts {
+                seq: 1,
+                room: 1,
+                online: Some(42),
+                watched: Some(55),
+            },
+        ),
+        ev(
+            base + 25,
+            EventKind::BiliCounts {
+                seq: 1,
+                room: 999,
+                online: Some(900),
+                watched: Some(900),
+            },
+        ),
+        ev(
+            base + 40,
+            EventKind::BiliCounts {
+                seq: 1,
+                room: 1,
+                online: Some(999),
+                watched: Some(999),
+            },
+        ),
+    ])
+    .unwrap();
+    let rows: Vec<(i64, i64, f64)> = w
+        .conn
+        .prepare(
+            "SELECT metric,session_id,sum FROM samples_raw WHERE metric IN (10,11) ORDER BY metric",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(rows, vec![(10, 1, 42.0), (11, 1, 55.0)]);
+}
+
+#[test]
+fn retention_hides_incomplete_groups_preserves_actives_and_never_reuses_ids() {
+    let (mut w, _) = writer("retained-groups");
+    session(&mut w, 1, T0 - 20 * DAY, None);
+    end(&mut w, 1, T0 - 19 * DAY, EndReason::SourceEnded);
+    w.conn
+        .execute_batch(
+            "WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x WHERE n<10000)
+         INSERT INTO runs(eid,session_id,run,started_at,last_seen_at,ended_at)
+         SELECT 'old-run-'||n,1,n,1,2,2 FROM x;",
+        )
+        .unwrap();
+    session(&mut w, 2, T0 - 20 * DAY, Some("active-key"));
+    let retention = HistoryRetention {
+        event_days: 1,
+        event_rows: 1,
+        ..Default::default()
+    };
+    maintain::tick(&w.conn, T0, &retention).unwrap();
+    assert_eq!(
+        w.conn
+            .query_row("SELECT pruned FROM sessions WHERE seq=1", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let page = sessions(&w, T0 + 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, "local:7:3");
+    assert_eq!(page.items[0].ended_at, None);
+    assert_eq!(page.items[0].runs, 1);
+    assert!(query::retention_floor(&w.conn).unwrap().is_some());
+    for _ in 0..4 {
+        maintain::tick(&w.conn, T0, &retention).unwrap();
+    }
+    assert_eq!(count(&w, "sessions"), 1);
+    assert_eq!(count(&w, "runs"), 1);
+    end(&mut w, 2, T0 + 1, EndReason::UserStop);
+    maintain::tick(&w.conn, T0 + 10 * DAY, &retention).unwrap();
+    assert_eq!(count(&w, "sessions"), 0);
+    session(&mut w, 3, T0 + 11 * DAY, None);
+    assert_eq!(
+        w.conn
+            .query_row("SELECT id FROM sessions", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+}
+
+#[test]
+fn event_book_boot_and_reserved_rollup_retention_is_bounded() {
+    let (mut w, _) = writer("table-retention");
+    session(&mut w, 1, T0 - 10 * DAY, Some("active-key"));
+    w.conn.execute_batch(
+        "WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x WHERE n<9000)
+         INSERT INTO events(eid,at,node,kind,severity,title,detail) SELECT 'old-'||n,n,'local','test','info','','' FROM x;
+         WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x WHERE n<10)
+         INSERT INTO boots(boot_id,node,started_at,last_seen_at,version) SELECT n+100,'local',n,n,'test' FROM x;
+         INSERT INTO bili_lives(live_key,node,room,started_at,ended_at) VALUES
+         ('active-key','local',1,1,NULL),('old-closed','local',1,1,2),('recent-closed','local',1,100,101),('live-24x7','local',2,1,NULL);
+",
+    ).unwrap();
+    let retention = HistoryRetention {
+        event_rows: 1,
+        event_days: 1,
+        rollup_days: 1,
+        ..Default::default()
+    };
+    maintain::tick(&w.conn, T0, &retention).unwrap();
+    assert_eq!(
+        count(&w, "events"),
+        1000,
+        "four batches of 2000 rows, not the full backlog"
+    );
+    assert_eq!(count(&w, "boots"), 1, "current referenced boot survives");
+    assert_eq!(
+        w.conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='samples_1h'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0,
+        "the never-written rollup table is not in the schema"
+    );
+    let keys: Vec<String> = w
+        .conn
+        .prepare("SELECT live_key FROM bili_lives ORDER BY live_key")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(keys, vec!["active-key", "live-24x7"]);
+    assert!(query::retention_floor(&w.conn).unwrap().is_some());
+}
+
+#[test]
+fn pinned_reader_pauses_writes_and_checkpoint_resumes_within_file_budget() {
+    let (mut w, path) = writer("pinned-reader");
+    session(&mut w, 1, T0, None);
+    let retention = HistoryRetention {
+        max_mb: 16,
+        ..Default::default()
+    };
+    maintain::configure_limits(&w.conn, &retention).unwrap();
+    w.conn
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    let reader = schema::open_ro(&path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM events;")
+        .unwrap();
+    let mut paused = false;
+    for batch in 0..500 {
+        if !maintain::admit_write(&w.conn, &retention).unwrap() {
+            paused = true;
+            break;
+        }
+        let events: Vec<_> = (0..200)
+            .map(|offset| {
+                ev(
+                    T0 + batch * 200 + offset,
+                    EventKind::LocalFault {
+                        reason: "d".repeat(480),
+                        latched: true,
+                    },
+                )
+            })
+            .collect();
+        w.commit(&events).unwrap();
+    }
+    assert!(paused, "a pinned WAL cannot grow without limit");
+    let space = maintain::space(&w.conn, &retention).unwrap();
+    assert!(space.db_bytes + space.wal_bytes <= space.limit_bytes);
+    assert_eq!(
+        w.conn
+            .query_row("SELECT ended_at FROM sessions", [], |r| r
+                .get::<_, Option<i64>>(0))
+            .unwrap(),
+        None
+    );
+    reader.execute_batch("ROLLBACK").unwrap();
+    assert!(maintain::admit_write(&w.conn, &retention).unwrap());
+    assert_eq!(maintain::space(&w.conn, &retention).unwrap().wal_bytes, 0);
+    end(&mut w, 1, T0 + 10, EndReason::UserStop);
+}
+
+#[test]
+fn pinned_reader_bounds_wal_across_a_complete_maintenance_tick() {
+    let (mut w, path) = writer("pinned-maintenance");
+    session(&mut w, 1, T0, None);
+    let retention = HistoryRetention {
+        max_mb: 16,
+        event_days: 1,
+        ..Default::default()
+    };
+    let mut batch = 0;
+    while maintain::space(&w.conn, &retention).unwrap().db_bytes < 11 * 1024 * 1024 + 512 * 1024 {
+        let events: Vec<_> = (0..200)
+            .map(|offset| {
+                ev(
+                    T0 - 200 * DAY + batch * 200 + offset,
+                    EventKind::LocalFault {
+                        reason: "d".repeat(480),
+                        latched: true,
+                    },
+                )
+            })
+            .collect();
+        w.commit(&events).unwrap();
+        let attempts: Vec<_> = (0..200)
+            .map(|offset| {
+                ev(
+                    T0 - 200 * DAY + batch * 200 + offset,
+                    EventKind::NotifySent {
+                        key: "k".repeat(120),
+                        dedup: "d".repeat(240),
+                        phase: "fire",
+                        mode: Some("active"),
+                        ok: true,
+                        code: None,
+                        trace_id: Some("t".repeat(80)),
+                        test: false,
+                        suppressed: 0,
+                        undelivered: 0,
+                    },
+                )
+            })
+            .collect();
+        w.commit(&attempts).unwrap();
+        batch += 1;
+    }
+    maintain::configure_limits(&w.conn, &retention).unwrap();
+    w.conn
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    let reader = schema::open_ro(&path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM events;")
+        .unwrap();
+    let initial_events = count(&w, "events");
+    maintain::tick(&w.conn, T0, &retention).unwrap();
+    let space = maintain::space(&w.conn, &retention).unwrap();
+    assert!(
+        space.db_bytes + space.wal_bytes <= space.limit_bytes,
+        "one maintenance tick exceeded the combined cap: {space:?}"
+    );
+    assert!(
+        count(&w, "events") < initial_events,
+        "bounded cleanup still makes progress"
+    );
+    assert_eq!(count(&w, "sessions"), 1, "active session survives cleanup");
+    reader.execute_batch("ROLLBACK").unwrap();
+    assert!(maintain::admit_write(&w.conn, &retention).unwrap());
+    for _ in 0..20 {
+        maintain::tick(&w.conn, T0, &retention).unwrap();
+        if count(&w, "events") == 0 && count(&w, "notify_sends") == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        count(&w, "events"),
+        0,
+        "cleanup resumes after the reader releases"
+    );
+    assert_eq!(count(&w, "notify_sends"), 0, "every table resumes cleanup");
+}
+
+#[test]
+fn a_down_node_keeps_one_segment_while_probes_disagree() {
+    let (mut w, _path) = writer_node("probe-flap", "jp");
+    let node = |at: i64, state: crate::events::NodeState, reason: &str| {
+        ev(
+            at,
+            EventKind::NodeState {
+                node_id: "ca".into(),
+                state,
+                reason: reason.into(),
+                initial: false,
+                minority: false,
+            },
+        )
+    };
+    w.apply(&node(
+        1_000,
+        crate::events::NodeState::Down,
+        "heartbeat_timeout",
+    ))
+    .unwrap();
+    w.apply(&node(
+        1_030,
+        crate::events::NodeState::Down,
+        "api_unreachable",
+    ))
+    .unwrap();
+    w.apply(&node(
+        1_060,
+        crate::events::NodeState::Down,
+        "heartbeat_timeout",
+    ))
+    .unwrap();
+    assert_eq!(count(&w, "events"), 1, "one outage is one event");
+    assert_eq!(
+        count(&w, "node_segments"),
+        1,
+        "the open segment keeps its reason"
+    );
+    w.apply(&node(1_090, crate::events::NodeState::Up, "healthy"))
+        .unwrap();
+    assert_eq!(count(&w, "events"), 2, "recovery is still its own event");
+    assert_eq!(count(&w, "node_segments"), 2);
+}
+
+/// The clear control is the only path the dashboard button uses. It must run
+/// on the writer thread (never a second connection), refuse while a relay is
+/// open, and drain the queue first so a just-captured sample cannot reappear.
+#[test]
+fn clear_control_refuses_an_open_relay_and_deletes_what_it_drained() {
+    use std::sync::Arc;
+    let (mut w, path) = writer("clear-control");
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Arc<Event>>(16);
+    for event in [
+        ev(
+            T0,
+            EventKind::SessionStarted {
+                seq: 1,
+                platform: "YT",
+                channel_id: "c".into(),
+                channel_name: "n".into(),
+                title: None,
+                live_key: Some("key-a".into()),
+                source_id: None,
+                area_v2: None,
+                room: 1,
+            },
+        ),
+        ev(T0, EventKind::FfmpegStarted { seq: 1, run: 10 }),
+        ev(
+            T0 + 1,
+            EventKind::StatsSample {
+                seq: 1,
+                bitrate_kbps: (1000.0, 2000.0, 3000.0),
+                fps: Some(30.0),
+                speed: Some(1.0),
+            },
+        ),
+    ] {
+        tx.try_send(Arc::new(event)).unwrap();
+    }
+    let shared = flush_shared(&path);
+
+    let refused = crate::history::clear_rows(&mut w, &mut rx, &shared, true).unwrap_err();
+    assert!(refused.contains("正在转播"), "{refused}");
+    assert_eq!(rx.len(), 3, "a refused clear leaves the queue alone");
+    assert_eq!(count(&w, "sessions"), 0);
+
+    let rows = crate::history::clear_rows(&mut w, &mut rx, &shared, false).unwrap();
+    assert!(
+        rows > 0,
+        "queued rows are drained and counted before deletion"
+    );
+    assert!(rx.is_empty());
+    for table in CLEARED {
+        assert_eq!(count(&w, table), 0, "{table} still has rows");
+    }
+    assert_eq!(count(&w, "boots"), 1);
+    let status = shared.status.lock().unwrap();
+    assert_eq!(status.state, "running");
+    assert!(status.last_error.is_none());
+}

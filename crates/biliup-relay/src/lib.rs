@@ -1,11 +1,12 @@
 pub mod app_state;
 pub mod compat;
-// 阶段替换：C/D 组插件仍按源仓库的 crate::cluster / crate::history / crate::webui 路径引用，
+// 阶段替换：C/D 组插件仍按源仓库的 crate::cluster / crate::webui 路径引用，
 // 这里先指向 compat 薄适配层，Phase 2/5 真实模块迁入后改为直接声明。
-pub(crate) use compat::{cluster, history, notify, webui};
+pub(crate) use compat::{cluster, notify, webui};
 pub mod config;
 pub mod credential_bridge;
 pub mod events;
+pub mod history;
 pub(crate) mod logging;
 pub mod plugins;
 pub mod runtime;
@@ -171,6 +172,10 @@ impl RelayService {
         }
         std::fs::create_dir_all(&cfg.data_dir).map_err(RelayError::DataDir)?;
         let store = storage::init(&cfg.data_dir, cfg.key_file.as_deref()).map_err(RelayError::Storage)?;
+        // 统计引擎先注册总线消费者，再让 seal 发出进程启动事实；
+        // 顺序颠倒会让统计静默漏收本进程的全部事件。
+        history::start().await;
+        events::seal();
         let mut inner = lock(&self.inner);
         inner.state = String::from(STATE_READY);
         inner.data_dir = cfg.data_dir;
@@ -345,6 +350,9 @@ impl RelayService {
                 }
             }
         }
+        // 统计库在存储句柄释放前关闭：最后一批事件落盘、写入线程退出并
+        // 关闭 history.sqlite，同进程重新 start 才能换目录干净建库。
+        history::shutdown(Duration::from_secs(2)).await;
         let held = {
             let mut inner = lock(&self.inner);
             let held = inner.storage.take().is_some();
@@ -360,6 +368,8 @@ impl RelayService {
 
 impl Drop for RelayService {
     fn drop(&mut self) {
+        // 统计句柄在这里同步收尾：Drop 不能 await，只能让写入线程自己退出。
+        history::shutdown_blocking(Duration::from_secs(2));
         // Monitor::drop 会发出停止信号，监控线程自行完成停弹幕与停推流。
         let inner = self
             .inner

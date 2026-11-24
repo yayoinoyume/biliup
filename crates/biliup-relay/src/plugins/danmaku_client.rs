@@ -49,7 +49,7 @@ pub(crate) fn capture_warning_message(
             .unwrap_or_default();
         keys.sort();
         let reason = violation_reason(message).map(|reason| reason.reason);
-        crate::compat::history::capture::warning_frame(cmd, &keys, reason.as_deref());
+        crate::history::capture::warning_frame(cmd, &keys, reason.as_deref());
     }
     let mut event = warnings.capture_event();
     // Classify the 违规原因 once, at capture, so every later mark of this
@@ -735,7 +735,7 @@ pub(crate) fn violation_reason(message: &DanmakuMessage) -> Option<Reason> {
 /// Every frame of one 警告/切断 arrives within [`VIOLATION_WINDOW`]; within
 /// it a more detailed reason replaces a less detailed one, never the reverse.
 const VIOLATION_WINDOW: Duration =
-    Duration::from_secs(crate::compat::history::VIOLATION_WINDOW_SECS as u64);
+    Duration::from_secs(crate::history::VIOLATION_WINDOW_SECS as u64);
 
 fn recent_violations(
 ) -> &'static Mutex<std::collections::HashMap<u64, (Instant, crate::events::EndDetail)>> {
@@ -787,10 +787,10 @@ struct AudienceCounts {
 
 /// The fixed event `detail` when Bilibili sent no reason. The history query
 /// treats every one as "no reason" (`history::STOCK_FALLBACKS`).
-const FALLBACK_WARNING: &str = crate::compat::history::STOCK_FALLBACKS[0];
-const FALLBACK_CUT_OFF: &str = crate::compat::history::STOCK_FALLBACKS[1];
-const FALLBACK_DIALOG: &str = crate::compat::history::STOCK_FALLBACKS[2];
-const FALLBACK_MASK: &str = crate::compat::history::STOCK_FALLBACKS[3];
+const FALLBACK_WARNING: &str = crate::history::STOCK_FALLBACKS[0];
+const FALLBACK_CUT_OFF: &str = crate::history::STOCK_FALLBACKS[1];
+const FALLBACK_DIALOG: &str = crate::history::STOCK_FALLBACKS[2];
+const FALLBACK_MASK: &str = crate::history::STOCK_FALLBACKS[3];
 
 /// How a 警告/切断 frame stops the room. Classification (ruling 4) never
 /// changes this: a mask is recorded as a warning but still stops the room.
@@ -836,8 +836,8 @@ fn room_history_event(
     message: &DanmakuMessage,
     room: u64,
     seq: Option<u64>,
-) -> Option<crate::compat::history::EventKind> {
-    use crate::compat::history::EventKind;
+) -> Option<crate::history::EventKind> {
+    use crate::history::EventKind;
     let (msg, rank) = match message.cmd.as_str() {
         // Ruling 4: the mask's detail is `data.title` only (never `lines`,
         // `icon` or `room_id`), cleaned like every reason.
@@ -893,7 +893,7 @@ impl AudienceCounts {
         message: &DanmakuMessage,
         now: Instant,
         sample_secs: u64,
-    ) -> Option<crate::compat::history::EventKind> {
+    ) -> Option<crate::history::EventKind> {
         let identity = seq.map(|seq| (room, seq));
         if self.identity != identity {
             self.identity = identity;
@@ -929,7 +929,7 @@ impl AudienceCounts {
         }
         self.last_emit = Some(now);
         self.emitted = values;
-        Some(crate::compat::history::EventKind::BiliCounts {
+        Some(crate::history::EventKind::BiliCounts {
             seq,
             room,
             online: self.online,
@@ -1211,8 +1211,8 @@ impl BilibiliDanmakuClient {
         // every sample first so it cannot inherit a later relay's identity.
         let at = crate::storage::now();
         let observed_at = Instant::now();
-        let seq = crate::compat::history::recording_enabled()
-            .then(|| crate::compat::history::open_session_seq(self.room_id))
+        let seq = crate::history::recording_enabled()
+            .then(|| crate::history::open_session_seq(self.room_id))
             .flatten()
             .filter(|_| crate::compat::cluster::local_monitoring_allowed(&self.app_config));
         let messages = decode_danmaku_messages(data)?;
@@ -1221,7 +1221,7 @@ impl BilibiliDanmakuClient {
             seq,
             at,
             observed_at,
-            crate::compat::history::bili_sample_secs(),
+            crate::history::bili_sample_secs(),
         );
         let warnings = warning_tracker();
         let warning_events: Vec<_> = messages
@@ -1245,9 +1245,9 @@ impl BilibiliDanmakuClient {
     ) {
         for message in messages {
             match message.cmd.as_str() {
-                "LIVE" => crate::compat::history::bili::observe_room_status_at(self.room_id, true, at),
+                "LIVE" => crate::history::bili::observe_room_status_at(self.room_id, true, at),
                 "PREPARING" => {
-                    crate::compat::history::bili::observe_room_status_at(self.room_id, false, at)
+                    crate::history::bili::observe_room_status_at(self.room_id, false, at)
                 }
                 _ => {}
             }
@@ -1263,7 +1263,7 @@ impl BilibiliDanmakuClient {
                 room_history_event(message, self.room_id, seq)
             };
             if let Some(event) = event {
-                crate::compat::history::emit_at(at, event);
+                crate::history::emit_at(at, event);
             }
         }
     }
@@ -1728,7 +1728,7 @@ mod tests {
 
     #[test]
     fn audience_preserves_zero_unknown_fields_and_latest_values_with_room_throttle() {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         let now = Instant::now();
         let mut counts = AudienceCounts::default();
         let zero = audience_message("ONLINE_RANK_COUNT", serde_json::json!({"online_count": 0}));
@@ -1800,8 +1800,8 @@ mod tests {
 
     #[test]
     fn decoded_counts_keep_observation_identity_when_writer_has_already_started_next_session() {
-        use crate::compat::history::event::Event;
-        use crate::compat::history::{EndReason, EventKind};
+        use crate::history::event::Event;
+        use crate::history::{EndReason, EventKind};
         let client = client_for_messages();
         let frame = packet(
             PROTOCOL_COMMAND,
@@ -1825,8 +1825,8 @@ mod tests {
                 ..
             }
         ));
-        let conn = crate::compat::history::schema::open_rw(std::path::Path::new(":memory:")).unwrap();
-        let mut writer = crate::compat::history::writer::Writer::new(conn, "local", 1);
+        let conn = crate::history::schema::open_rw(std::path::Path::new(":memory:")).unwrap();
+        let mut writer = crate::history::writer::Writer::new(conn, "local", 1);
         let start = |seq| EventKind::SessionStarted {
             seq,
             platform: "YT",
@@ -1885,7 +1885,7 @@ mod tests {
 
     #[test]
     fn room_warning_and_cut_packets_emit_safe_facts_without_running_commands() {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         let client = client_for_messages();
         let bus = Arc::new(crate::events::Bus::new());
         let mut rx = bus.register("room-facts", 8, |_| true);
@@ -2162,7 +2162,7 @@ mod tests {
     }
 
     fn history(message: &DanmakuMessage) -> (bool, String, u8) {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         match room_history_event(message, 1, None).unwrap() {
             EventKind::BiliWarning { msg, rank, .. } => (false, msg, rank),
             EventKind::BiliCutOff { msg, rank, .. } => (true, msg, rank),
@@ -2470,7 +2470,7 @@ mod tests {
 
     #[test]
     fn one_frame_with_cut_off_and_v2_emits_both_ranked_for_the_writer() {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         let client = client_for_messages();
         let bus = Arc::new(crate::events::Bus::new());
         let mut rx = bus.register("cut-facts", 8, |_| true);
@@ -2494,7 +2494,7 @@ mod tests {
 
     #[test]
     fn ruling4_the_2024_11_13_warning_dialog_is_recorded_as_bili_warning() {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         let message = parse(FIX_DIALOG);
         assert!(!records_as_cut_off(&message));
         assert!(matches!(
@@ -2505,7 +2505,7 @@ mod tests {
 
     #[test]
     fn ruling4_a_dialog_whose_result_contains_cut_is_recorded_as_bili_cut_off() {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         // Synthetic: the dialog shape with a 切断 处罚结果, rows reordered.
         let message = parse(
             r#"{"cmd":"ANCHOR_ECOLOGY_LIVING_DIALOG","data":{"dialog_title":"直播间违规","dialog_message_list":[
@@ -2544,7 +2544,7 @@ mod tests {
 
     #[test]
     fn ruling4_cut_frames_stay_bili_cut_off_and_warnings_stay_warnings() {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         for json in [FIX_CUT_OFF, FIX_CUT_OFF_V2] {
             let message = parse(json);
             assert!(records_as_cut_off(&message), "{json}");
@@ -2563,7 +2563,7 @@ mod tests {
 
     #[test]
     fn ruling4_full_screen_mask_is_a_warning_with_the_title_only() {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         let message = parse(FIX_MASK);
         assert!(matches!(
             room_history_event(&message, 1, Some(4)).unwrap(),
@@ -2679,7 +2679,7 @@ mod tests {
 
     #[test]
     fn item4_a_dialog_without_a_result_row_is_a_warning() {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         let message = parse(
             r#"{"cmd":"ANCHOR_ECOLOGY_LIVING_DIALOG","data":{"dialog_title":"直播间违规","dialog_message_list":[
               {"label":"违规原因","content":"您本场直播存在挂机、录播等消极直播行为，请及时整改"},
@@ -2700,7 +2700,7 @@ mod tests {
 
     #[test]
     fn item4_mask_title_with_a_link_and_control_characters_is_fully_cleaned() {
-        use crate::compat::history::EventKind;
+        use crate::history::EventKind;
         let message = audience_message(
             "FULL_SCREEN_MASK_OPEN",
             serde_json::json!({

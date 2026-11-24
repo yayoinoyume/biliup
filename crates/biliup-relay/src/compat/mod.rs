@@ -5,10 +5,8 @@
 //! 替换时机：
 //! - `webui`：Phase 2 Web 服务迁入后删除；
 //! - `cluster`：Phase 2 集群同步迁入后删除；
-//! - `history`：Phase 2 统计历史迁入后删除；
 //! - `notify`：Phase 4 通知迁入后删除。
 
 pub(crate) mod cluster;
-pub(crate) mod history;
 pub(crate) mod notify;
 pub(crate) mod webui;
