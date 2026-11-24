@@ -288,9 +288,7 @@ mod tests {
 
     #[test]
     fn standalone_encrypted_source_reads_through_the_process_store() {
-        let _guard = crate::storage::TEST_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::storage::lock_test_global();
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("keys/master.key");
         let store = crate::storage::init(&dir.path().join("data"), Some(&key)).unwrap();

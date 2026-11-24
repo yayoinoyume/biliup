@@ -564,9 +564,7 @@ fn old_format_channel_keys_are_refused_by_name_without_their_content() {
 
 #[test]
 fn store_can_be_shutdown_and_reopened_in_the_same_process() {
-    let _guard = TEST_STORE_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = lock_test_global();
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     let key = dir.path().join("keys/master.key");

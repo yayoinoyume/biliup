@@ -9,10 +9,6 @@ use crate::storage;
 use crate::{RelayInitConfig, RelayService};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
-
-/// 这些用例共用进程级存储、事件总线与统计句柄，必须串行。
-static SERIAL: Mutex<()> = Mutex::const_new(());
 
 struct Harness {
     _dir: tempfile::TempDir,
@@ -80,17 +76,18 @@ fn assert_boot_rows(db: &str, label: &str) {
     );
 }
 
-fn lock_store() -> std::sync::MutexGuard<'static, ()> {
-    storage::TEST_STORE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn writer_status() -> Option<(&'static str, Option<String>)> {
+    super::shared().map(|shared| {
+        let status = shared.status.lock().unwrap_or_else(|e| e.into_inner());
+        (status.state, status.last_error.clone())
+    })
 }
 
 fn rows(db: &str, sql: &str, seq: u64) -> i64 {
-    super::schema::open_ro(std::path::Path::new(db))
-        .expect("只读打开统计库")
-        .query_row(sql, [seq as i64], |row| row.get(0))
-        .expect("查询统计库")
+    let conn = super::schema::open_ro(std::path::Path::new(db))
+        .unwrap_or_else(|error| panic!("只读打开 {db} 失败：{error:?}（writer={:?}）", writer_status()));
+    conn.query_row(sql, [seq as i64], |row| row.get(0))
+        .unwrap_or_else(|error| panic!("查询 {db} 失败：{error:?}（writer={:?}）", writer_status()))
 }
 
 /// 统计写入线程是唯一按名字登记的后台线程；停机后必须归零。
@@ -116,8 +113,7 @@ fn writer_threads() -> usize {
 
 #[tokio::test]
 async fn session_guard_facts_reach_disk_before_shutdown_returns() {
-    let _serial = SERIAL.lock().await;
-    let _store = lock_store();
+    let _store = storage::lock_test_global();
     let (harness, relay) = boot(987_654).await;
     assert!(
         super::recording_enabled(),
@@ -189,8 +185,7 @@ async fn session_guard_facts_reach_disk_before_shutdown_returns() {
 
 #[tokio::test]
 async fn two_data_directories_in_one_process_stay_independent() {
-    let _serial = SERIAL.lock().await;
-    let _store = lock_store();
+    let _store = storage::lock_test_global();
 
     let (dir_a, relay_a) = boot(700_001).await;
     let cfg = load_config().await.expect("读取配置");
@@ -247,8 +242,7 @@ async fn two_data_directories_in_one_process_stay_independent() {
 
 #[tokio::test]
 async fn a_committed_batch_publishes_the_history_ui_event() {
-    let _serial = SERIAL.lock().await;
-    let _store = lock_store();
+    let _store = storage::lock_test_global();
     let (harness, relay) = boot(700_003).await;
     let mut rx = crate::ui_events::subscribe();
     let cfg = load_config().await.expect("读取配置");
@@ -271,8 +265,7 @@ async fn a_committed_batch_publishes_the_history_ui_event() {
 
 #[tokio::test]
 async fn clear_refuses_an_open_relay_and_succeeds_after_it_ends() {
-    let _serial = SERIAL.lock().await;
-    let _store = lock_store();
+    let _store = storage::lock_test_global();
     let (harness, relay) = boot(700_004).await;
     let cfg = load_config().await.expect("读取配置");
     let guard = SessionGuard::start(&cfg, "YT", "UC_history_clear", "清理频道", None);
@@ -296,8 +289,7 @@ async fn clear_refuses_an_open_relay_and_succeeds_after_it_ends() {
 
 #[tokio::test]
 async fn restarting_in_the_same_directory_advances_the_boot_row() {
-    let _serial = SERIAL.lock().await;
-    let _store = lock_store();
+    let _store = storage::lock_test_global();
     let (harness, relay) = boot(710_001).await;
     let cfg = load_config().await.expect("读取配置");
     let first = SessionGuard::start(&cfg, "YT", "UC_history_boot_a", "同目录A", None);

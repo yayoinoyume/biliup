@@ -627,8 +627,49 @@ static GLOBAL: RwLock<Option<Arc<Store>>> = RwLock::new(None);
 static REGISTERED: RwLock<Option<(PathBuf, PathBuf)>> = RwLock::new(None);
 static INITIALIZING: Mutex<()> = Mutex::new(());
 
+/// 进程级全局状态的唯一测试串行锁。
+///
+/// 存储、RelayService、history 统计引擎与事件总线都是进程级单例：任何会启动或
+/// 停机它们的测试都必须先拿这把锁，否则一个用例的 shutdown 会杀掉另一个用例正在
+/// 驱动的写入线程，或把它的全局存储换掉。统一入口是 lock_test_global()，它还会把
+/// 同一线程重复获取（std::sync::Mutex 不可重入，必然死锁）变成一条明确的 panic。
 #[cfg(test)]
 pub(crate) static TEST_STORE_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GLOBAL_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// lock_test_global() 的守卫：释放时清掉线程内的“已持有”标记。
+#[cfg(test)]
+pub(crate) struct TestGlobalGuard(Option<std::sync::MutexGuard<'static, ()>>);
+
+#[cfg(test)]
+impl Drop for TestGlobalGuard {
+    fn drop(&mut self) {
+        self.0 = None;
+        TEST_GLOBAL_HELD.with(|held| held.set(false));
+    }
+}
+
+/// 获取进程级全局状态的测试串行锁。
+///
+/// 同一线程重复获取会 panic 而不是静默死锁。
+#[cfg(test)]
+pub(crate) fn lock_test_global() -> TestGlobalGuard {
+    TEST_GLOBAL_HELD.with(|held| {
+        assert!(
+            !held.get(),
+            "测试全局锁被同一线程重复获取：cargo test 会在此静默死锁"
+        );
+        held.set(true);
+    });
+    let guard = TEST_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    TestGlobalGuard(Some(guard))
+}
 
 /// 解析真实路径：先 canonicalize 最近存在的祖先，再折叠尾部尚不存在的组件。
 /// 父目录尚未创建时也不能跳过软链与 `..` 校验。

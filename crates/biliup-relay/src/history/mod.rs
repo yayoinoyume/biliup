@@ -255,28 +255,28 @@ fn secrets_of(cfg: &crate::config::Config) -> Vec<String> {
 ///
 /// The consumer is registered even when no config exists yet and its receiver
 /// is parked, because the bus registry can only be joined before the seal.
-pub async fn start() {
+pub async fn start() -> bool {
     let _serial = START_LOCK.lock().await;
     if ORPHANED.load(Ordering::Acquire) {
         tracing::error!("上一个统计写入线程未按预期退出，本进程不再启动新的统计引擎");
-        return;
+        return false;
     }
     if handle_lock().is_some() {
-        return;
+        return false;
     }
     let Some(rx) = event_receiver() else {
         ACTIVE.store(false, Ordering::Release);
-        return;
+        return false;
     };
     let Ok(cfg) = crate::config::load_config().await else {
         park_event_receiver(rx);
-        return;
+        return false;
     };
     let dir = match crate::storage::global() {
         Ok(store) => store.data_dir().to_path_buf(),
         Err(_) => {
             park_event_receiver(rx);
-            return;
+            return false;
         }
     };
     let path = dir.join("history.sqlite");
@@ -308,7 +308,7 @@ pub async fn start() {
             // installed handle owns ACTIVE.
             drop(slot);
             park_event_receiver(rx);
-            return;
+            return false;
         }
         ACTIVE.store(shared.enabled, Ordering::Release);
         *slot = Some(Handle {
@@ -321,7 +321,7 @@ pub async fn start() {
     if !cfg.history.enabled {
         set_state(&shared, "disabled", None);
         park_event_receiver(rx);
-        return;
+        return true;
     }
     set_state(&shared, "starting", None);
     let thread_shared = Arc::clone(&shared);
@@ -384,7 +384,7 @@ pub async fn start() {
             }
             ACTIVE.store(false, Ordering::Release);
             set_state(&shared, "error", Some("writer thread".into()));
-            return;
+            return false;
         }
     };
     let mut tasks = vec![tokio::spawn(sampler()), tokio::spawn(summary_sync())];
@@ -395,13 +395,16 @@ pub async fn start() {
             handle.tasks.append(&mut tasks);
         }
         None => {
+            // 句柄在装好前被别的停机取走：这次没有拿到所有权。
             ACTIVE.store(false, Ordering::Release);
             shared.stopping.store(true, Ordering::Release);
             for task in tasks {
                 task.abort();
             }
+            return false;
         }
     }
+    true
 }
 
 /// The process-wide bus consumer, registered once before the seal and then
@@ -440,6 +443,9 @@ fn take_handle() -> Option<Handle> {
 /// thread close the database file, then forget every process-wide fact this
 /// run owned so the next start opens the new directory cleanly.
 pub async fn shutdown(flush_timeout: Duration) {
+    // 与 start 互斥：停机若插在 start 装好句柄、还没装好线程句柄的窗口里，
+    // 会取走半成品句柄，写入线程就没人 join，运行态也会在它还在跑时被复位。
+    let _serial = START_LOCK.lock().await;
     let Some(handle) = take_handle() else {
         return;
     };

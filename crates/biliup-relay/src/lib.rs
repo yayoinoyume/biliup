@@ -126,6 +126,9 @@ struct Inner {
     monitor: Option<Monitor>,
     /// 本服务是否还持有引擎（弹幕/推流）的停机责任；确认停机完成后才复位。
     engine_owned: bool,
+    /// 统计引擎是否由本实例装上：进程级句柄只由装上它的那个服务停机，
+    /// 否则任意一个 RelayService 的 drop 都会杀掉别人正在跑的统计写入线程。
+    history_owned: bool,
     /// 监控循环代次：每次成功启动加一，旧 stop 只能复位自己那一代。
     epoch: u64,
     engine_owned_epoch: Option<u64>,
@@ -142,6 +145,7 @@ impl Inner {
             storage: None,
             monitor: None,
             engine_owned: false,
+            history_owned: false,
             epoch: 0,
             engine_owned_epoch: None,
             cleanup_pending: Arc::new(AtomicBool::new(false)),
@@ -174,7 +178,7 @@ impl RelayService {
         let store = storage::init(&cfg.data_dir, cfg.key_file.as_deref()).map_err(RelayError::Storage)?;
         // 统计引擎先注册总线消费者，再让 seal 发出进程启动事实；
         // 顺序颠倒会让统计静默漏收本进程的全部事件。
-        history::start().await;
+        let history_owned = history::start().await;
         if !events::seal() {
             // 第二次及以后的 start：seal 只在首次补发进程启动事实，而统计库
             // 需要一行 boots 才能让本次进程的会话不悬空、并让心跳继续推进
@@ -187,6 +191,7 @@ impl RelayService {
         inner.state = String::from(STATE_READY);
         inner.data_dir = cfg.data_dir;
         inner.ready = true;
+        inner.history_owned = history_owned;
         inner.storage = Some(store);
         Ok(())
     }
@@ -359,7 +364,14 @@ impl RelayService {
         }
         // 统计库在存储句柄释放前关闭：最后一批事件落盘、写入线程退出并
         // 关闭 history.sqlite，同进程重新 start 才能换目录干净建库。
-        history::shutdown(Duration::from_secs(2)).await;
+        // 只停本实例装上的引擎：别人的引擎有自己的停机者。
+        let history_owned = {
+            let mut inner = lock(&self.inner);
+            std::mem::take(&mut inner.history_owned)
+        };
+        if history_owned {
+            history::shutdown(Duration::from_secs(2)).await;
+        }
         let held = {
             let mut inner = lock(&self.inner);
             let held = inner.storage.take().is_some();
@@ -375,13 +387,16 @@ impl RelayService {
 
 impl Drop for RelayService {
     fn drop(&mut self) {
-        // 统计句柄在这里同步收尾：Drop 不能 await，只能让写入线程自己退出。
-        history::shutdown_blocking(Duration::from_secs(2));
         // Monitor::drop 会发出停止信号，监控线程自行完成停弹幕与停推流。
         let inner = self
             .inner
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 统计句柄在这里同步收尾：Drop 不能 await，只能让写入线程自己退出。
+        // 同样只停本实例装上的引擎，不能顺手杀掉别人的。
+        if std::mem::take(&mut inner.history_owned) {
+            history::shutdown_blocking(Duration::from_secs(2));
+        }
         // 边界：没有待收尾的清理、且监控线程已跑完（或从未启动）时才动全局
         // 存储。stop 超时后线程已自行收尾的情况也走这里释放。
         let cleanup_done = !inner.cleanup_pending.load(Ordering::SeqCst)
@@ -470,9 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_opens_the_encrypted_store_and_shutdown_is_idempotent() {
-        let _guard = storage::TEST_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = storage::lock_test_global();
         let dir = tempfile::tempdir().unwrap();
         let relay = RelayService::new();
         let key_file = dir.path().join("keys/master.key");
@@ -539,8 +552,6 @@ mod tests {
         drop(reopened);
         relay.shutdown().await;
     }
-
-    static ENGINE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn boot_relay_for_monitor() -> (tempfile::TempDir, RelayService) {
         let dir = tempfile::tempdir().unwrap();
@@ -628,10 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn monitor_stop_reports_all_three_outcomes() {
-        let _serial = ENGINE_SERIAL.lock().await;
-        let _store = storage::TEST_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _store = storage::lock_test_global();
         // 引擎是进程级单例：与 ffmpeg 的生命周期测试互斥，避免互相清空推流。
         let _engine = crate::plugins::ffmpeg::FFMPEG_TEST_GUARD
             .lock()
@@ -695,10 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_running_stop_rejects_a_new_monitor_until_the_thread_finishes() {
-        let _serial = ENGINE_SERIAL.lock().await;
-        let _store = storage::TEST_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _store = storage::lock_test_global();
         // 引擎是进程级单例：与 ffmpeg 的生命周期测试互斥，避免互相清空推流。
         let _engine = crate::plugins::ffmpeg::FFMPEG_TEST_GUARD
             .lock()
@@ -759,10 +764,7 @@ mod tests {
 
     #[tokio::test]
     async fn drop_releases_storage_after_the_monitor_finishes() {
-        let _serial = ENGINE_SERIAL.lock().await;
-        let _store = storage::TEST_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _store = storage::lock_test_global();
         // 引擎是进程级单例：与 ffmpeg 的生命周期测试互斥，避免互相清空推流。
         let _engine = crate::plugins::ffmpeg::FFMPEG_TEST_GUARD
             .lock()

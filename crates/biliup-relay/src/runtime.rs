@@ -4184,6 +4184,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_exempt_hold_releases_once_and_a_second_event_holds() {
+        // 冷却记录写在进程级存储里：与所有会换库/关库的测试串行，否则两次
+        // skip 之间库被换掉，冷却读不到就会被再释放一次。
+        let _store = crate::storage::lock_test_global();
         use bilistream::plugins::danmaku::warning::{BroadcastSource, WarningTracker};
         use bilistream::plugins::warning_exempt::{ExemptChannel, ReasonId};
 
