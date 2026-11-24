@@ -1,8 +1,8 @@
 pub mod app_state;
 pub mod compat;
-// 阶段替换：C/D 组插件仍按源仓库的 crate::cluster / crate::webui 路径引用，
-// 这里先指向 compat 薄适配层，Phase 2/5 真实模块迁入后改为直接声明。
-pub(crate) use compat::{cluster, notify, webui};
+// 阶段替换：C/D 组插件仍按源仓库的 crate::cluster 路径引用，
+// 这里先指向 compat 薄适配层，Phase 3 集群真实模块迁入后改为直接声明。
+pub(crate) use compat::{cluster, notify};
 pub mod config;
 pub mod credential_bridge;
 pub mod events;
@@ -12,6 +12,7 @@ pub mod plugins;
 pub mod runtime;
 pub mod storage;
 pub mod ui_events;
+pub mod webui;
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -27,7 +28,7 @@ pub use credential_bridge::{
     load_credentials, RelayBiliAccountSource, RelayBiliCredentials, RelayBiliCredentialsError,
 };
 pub use storage::Store;
-pub use compat::webui::state::{
+pub use webui::state::{
     get_status_cache, refresh_status_cache_config_from, request_status_refresh, status_snapshot,
     update_status_cache, update_status_cache_with, wait_status_refresh_notified, BiliStatus,
     NicoStatus, PriorityChannelStatus, StatusData, TwStatus, YtStatus,
@@ -191,7 +192,7 @@ impl RelayService {
         inner.state = String::from(STATE_READY);
         inner.data_dir = cfg.data_dir;
         inner.ready = true;
-        inner.history_owned = history_owned;
+        inner.history_owned |= history_owned;
         inner.storage = Some(store);
         Ok(())
     }
@@ -419,7 +420,7 @@ impl Drop for RelayService {
 /// 集成测试需要的那一位；Phase 2 接上真实 WebUI 后由 REST 取代。
 #[doc(hidden)]
 pub async fn local_publisher_running() -> bool {
-    compat::webui::api::current_network_status()
+    webui::api::current_network_status()
         .await
         .ffmpeg_running
 }

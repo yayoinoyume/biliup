@@ -459,7 +459,7 @@ impl PublicStatusConfig {
         if self.bind.trim().is_empty() {
             return Err("公开状态页监听地址不能为空".to_string());
         }
-        crate::compat::webui::parse_bind(&self.bind)?;
+        crate::webui::parse_bind(&self.bind)?;
         let url = self.public_url.trim();
         if !url.is_empty() && danmaku_width(url) > Self::max_public_url_width() {
             return Err(format!(
@@ -1043,7 +1043,7 @@ where
 {
     save_config_inner(config, false, Box::new(edit)).await?;
     crate::plugins::set_config_updated();
-    crate::compat::webui::public::remap_after_areas_change();
+    crate::webui::public::remap_after_areas_change();
     Ok(())
 }
 
@@ -1090,9 +1090,9 @@ async fn save_config_inner(
         }));
         invalidate_config_cache();
         crate::plugins::priority::clear_prefetched_playable_stream();
-        crate::compat::webui::events::publish(crate::compat::webui::events::CONFIG);
-        crate::compat::webui::stream_list::wake();
-        crate::compat::webui::state::request_status_refresh();
+        crate::webui::events::publish(crate::webui::events::CONFIG);
+        crate::webui::stream_list::wake();
+        crate::webui::state::request_status_refresh();
         Ok(saved)
     })
     .await
@@ -1282,8 +1282,8 @@ fn managed_document_committed() {
     CONFIG_REVISION.fetch_add(1, Ordering::AcqRel);
     invalidate_config_cache();
     crate::plugins::set_config_updated();
-    crate::compat::webui::state::request_status_refresh();
-    crate::compat::webui::stream_list::wake();
+    crate::webui::state::request_status_refresh();
+    crate::webui::stream_list::wake();
 }
 
 pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

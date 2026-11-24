@@ -41,3 +41,13 @@ pub fn live_ended(cause: BroadcastEndCause) {
 pub fn live_ended_with(cause: BroadcastEndCause, detail: Option<EndDetail>) {
     crate::events::emit(EventKind::BroadcastEnded { cause, detail });
 }
+
+/// 待 Phase 4 通知选举迁入后替换：单机没有集群 recorder 角色。
+pub(crate) fn recorder_status() -> &'static str {
+    "none"
+}
+
+/// 待 Phase 4 通知迁入后替换：本阶段没有指令/网关队列。
+pub(crate) fn dropped() -> serde_json::Value {
+    serde_json::json!({"commands": 0, "gateway": 0, "events": 0})
+}

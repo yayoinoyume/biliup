@@ -255,7 +255,7 @@ impl WarningRelease {
             safe_text(&self.channel, 64),
             self.reason.label()
         );
-        crate::compat::webui::state::request_status_refresh();
+        crate::webui::state::request_status_refresh();
     }
 }
 
@@ -609,7 +609,7 @@ pub(crate) fn channel_from_bili_title(title: &str) -> Option<&str> {
 
 pub(crate) fn log_warning_mark(name: &str) {
     tracing::info!("已标记频道 {} 为警告状态，将跳过转播", safe_text(name, 64));
-    crate::compat::webui::state::request_status_refresh();
+    crate::webui::state::request_status_refresh();
 }
 
 #[cfg(test)]

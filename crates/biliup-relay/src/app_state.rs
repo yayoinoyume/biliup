@@ -6,7 +6,7 @@ use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::{broadcast, Notify};
 
 use crate::compat::cluster::ClusterState;
-use crate::compat::webui::state::StatusData;
+use crate::webui::state::StatusData;
 
 const LOG_CAPACITY: usize = 500;
 const EVENT_BUS_CAPACITY: usize = 64;
@@ -17,7 +17,7 @@ static PROCESS: OnceLock<AppState> = OnceLock::new();
 ///
 /// Distinct [`AppState::new`] values do not share logs, status, events, or
 /// cluster maps. Free-function shims such as
-/// [`crate::compat::webui::state::update_status_cache`] still go through
+/// [`crate::webui::state::update_status_cache`] still go through
 /// [`AppState::current`], which is the instance [`install`]ed at startup (or a
 /// lazily created process default in tests).
 #[derive(Clone)]
@@ -133,7 +133,7 @@ impl AppState {
         drop(cache);
 
         if changed {
-            self.publish(crate::compat::webui::events::STATUS);
+            self.publish(crate::webui::events::STATUS);
         }
     }
 
@@ -146,7 +146,7 @@ impl AppState {
         drop(cache);
 
         if changed {
-            self.publish(crate::compat::webui::events::STATUS);
+            self.publish(crate::webui::events::STATUS);
         }
     }
 
@@ -191,7 +191,7 @@ fn recover_lock<T>(lock: LockResult<T>, name: &str) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::webui::state::BiliStatus;
+    use crate::webui::state::BiliStatus;
 
     #[test]
     fn distinct_app_states_do_not_share_status_or_logs() {

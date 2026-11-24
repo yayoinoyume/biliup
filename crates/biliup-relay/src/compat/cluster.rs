@@ -249,3 +249,66 @@ fn write_canonical_json(value: &serde_json::Value, output: &mut String) {
         }
     }
 }
+
+/// 待 Phase 3 集群状态迁入后替换：单机恒为本机的活动节点。
+pub fn local_node_is_active_owner(_config: &Config) -> bool {
+    true
+}
+
+/// 待 Phase 3 集群状态迁入后替换：单机永远不是备用节点。
+pub fn is_standby(_config: &Config) -> bool {
+    false
+}
+
+/// 待 Phase 3 集群状态迁入后替换：单机是活动节点，监控开关永远可以打开。
+pub fn local_node_can_enable_monitor_toggles(_config: &Config) -> bool {
+    true
+}
+
+/// 待 Phase 3 集群监控开关同步迁入后替换：单机没有对端需要同步。
+pub fn schedule_active_monitor_state_sync_after_toggle_change(_config: &Config) -> String {
+    String::new()
+}
+
+/// 待 Phase 3 集群对等调用迁入后替换：单机没有对等节点，所有调用一律失败。
+pub mod peer_call {
+    use std::time::Duration;
+
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
+    use crate::config::Config;
+
+    pub mod routes {
+        pub const HISTORY: &str = "/api/cluster/v1/history";
+        pub const HISTORY_CLEAN: &str = "/api/cluster/v1/history/clean";
+    }
+
+    #[derive(Debug)]
+    pub enum PeerCallError {
+        Unreachable(String),
+        Refused(String),
+    }
+
+    #[derive(Debug)]
+    pub struct Envelope<T> {
+        pub success: bool,
+        pub data: Option<T>,
+        pub message: Option<String>,
+    }
+
+    /// 单机没有对等节点：调用恒为「不可达」，调用方按缺失节点上报。
+    pub async fn call<T, R>(
+        _config: &Config,
+        _node: &str,
+        _route: &str,
+        _body: Option<&T>,
+        _timeout: Duration,
+    ) -> Result<Envelope<R>, PeerCallError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        Err(PeerCallError::Unreachable("单机没有对等节点".to_string()))
+    }
+}

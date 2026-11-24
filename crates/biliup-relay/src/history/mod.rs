@@ -483,6 +483,11 @@ pub async fn shutdown(flush_timeout: Duration) {
 /// bounded time; it always exits on its own because stopping is checked at
 /// the top of every loop iteration.
 pub fn shutdown_blocking(timeout: Duration) {
+    // 与 start 互斥：引擎正在建起来时不得并发停机，否则会停掉别人的写入线程。
+    let Ok(_serial) = START_LOCK.try_lock() else {
+        tracing::warn!("统计引擎正在启动，跳过 Drop 停机");
+        return;
+    };
     let Some(handle) = take_handle() else {
         return;
     };

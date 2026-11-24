@@ -580,10 +580,10 @@ async fn bili_start_live_inner(cfg: &mut Config, area_v2: u64) -> Result<(), Box
 
     // Reflect the new live state in the WebUI immediately; the periodic
     // refresh fills in title/area details afterwards.
-    crate::compat::webui::state::update_status_cache_with(|status| {
+    crate::webui::state::update_status_cache_with(|status| {
         status.bilibili.is_live = true;
     });
-    crate::compat::webui::state::request_status_refresh();
+    crate::webui::state::request_status_refresh();
 
     Ok(())
 }
@@ -683,10 +683,10 @@ pub async fn bili_stop_live(cfg: &Config) -> Result<(), Box<dyn Error>> {
     validate_stop_live_reply(&reply)?;
 
     // Reflect the new live state in the WebUI immediately.
-    crate::compat::webui::state::update_status_cache_with(|status| {
+    crate::webui::state::update_status_cache_with(|status| {
         status.bilibili.is_live = false;
     });
-    crate::compat::webui::state::request_status_refresh();
+    crate::webui::state::request_status_refresh();
 
     crate::history::on_bili_stopped(cfg);
     Ok(())
@@ -1412,7 +1412,7 @@ async fn save_login_info(credential: &Credential, info: LoginInfo) -> Result<(),
 
     let store = crate::storage::global()?;
     tokio::task::spawn_blocking(move || store.write("cookies.json", final_info)).await??;
-    crate::compat::webui::state::request_status_refresh();
+    crate::webui::state::request_status_refresh();
 
     Ok(())
 }
@@ -1486,7 +1486,7 @@ pub async fn login() -> Result<(), Box<dyn Error>> {
 
     let store = crate::storage::global()?;
     tokio::task::spawn_blocking(move || store.write("cookies.json", final_info)).await??;
-    crate::compat::webui::state::request_status_refresh();
+    crate::webui::state::request_status_refresh();
     println!("登录成功，凭据已加密保存");
 
     Ok(())
@@ -1504,7 +1504,7 @@ pub async fn renew() -> Result<(), Box<dyn Error>> {
         store.compare_exchange("cookies.json", snapshot.revision, value)
     })
     .await??;
-    crate::compat::webui::state::request_status_refresh();
+    crate::webui::state::request_status_refresh();
 
     Ok(())
 }

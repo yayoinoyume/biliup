@@ -1277,8 +1277,8 @@ pub fn enable_danmaku_commands(enabled: bool) {
     // The public page keys 切换 on this gate. Bust the 5s snapshot so a
     // poll that lands after 转播 ends (and the "可使用弹幕指令进行换台"
     // danmaku) does not keep serving the closed state.
-    crate::compat::webui::public::snapshot::invalidate_public_status_snapshot();
-    crate::compat::webui::state::request_status_refresh();
+    crate::webui::public::snapshot::invalidate_public_status_snapshot();
+    crate::webui::state::request_status_refresh();
 }
 
 /// Stop the danmaku client
@@ -1441,7 +1441,7 @@ pub(crate) fn release_exempt_hold(
         safe_text(&released.channel, 64),
         reason_ids
     );
-    crate::compat::webui::state::request_status_refresh();
+    crate::webui::state::request_status_refresh();
     true
 }
 
