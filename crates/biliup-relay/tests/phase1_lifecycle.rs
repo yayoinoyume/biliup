@@ -8,20 +8,27 @@
 //! 引擎用零外网替身：推流侧登记一个真实 `sleep` 子进程（`stop_ffmpeg()` 按正常
 //! 路径终止它），弹幕侧只走真实的运行标志与停止信号协议。
 
+#[cfg(target_os = "linux")]
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
 use biliup_relay::config::{load_config, save_config, Config};
+#[cfg(target_os = "linux")]
+use biliup_relay::local_publisher_running;
+#[cfg(target_os = "linux")]
 use biliup_relay::plugins::priority::{
     store_prefetched_playable_stream, take_prefetched_playable_stream, PrefetchedPlayableStream,
     PriorityChannelPlatform,
 };
-use biliup_relay::{local_publisher_running, RelayInitConfig, RelayService};
+use biliup_relay::{RelayInitConfig, RelayService};
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(target_os = "linux")]
 const CHANNEL_ID: &str = "UC_phase1_lifecycle";
 
 /// 只写没有 serde 默认值的字段，其余交给 Config 的默认值。
@@ -46,6 +53,7 @@ fn seed_config_json() -> serde_json::Value {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn prefetched() -> PrefetchedPlayableStream {
     PrefetchedPlayableStream {
         platform: PriorityChannelPlatform::Youtube,
@@ -309,7 +317,7 @@ async fn dropping_the_service_still_stops_the_monitor_thread_and_engine() {
         .expect("drop 之后应能重新打开存储");
     let reloaded = load_config().await.expect("重新打开后读取配置");
     assert_eq!(reloaded.interval, 60);
-    assert!(Path::new(&harness.data_dir).exists());
+    assert!(harness.data_dir.exists());
     reopened.shutdown().await;
 }
 
@@ -331,21 +339,20 @@ async fn dropping_the_service_releases_storage_after_a_finished_monitor() {
     let _serial = SERIAL.lock().await;
     let (harness, relay) = boot().await;
 
-    let (done, finished) = tokio::sync::oneshot::channel();
-    assert_eq!(
-        relay.spawn_monitor_loop_with(move || async move {
-            let _ = done.send(());
-        }),
-        biliup_relay::MonitorSpawnOutcome::Started
-    );
-    finished.await.expect("监控任务应自然结束");
-    // 清理在同一线程里紧跟任务执行，给它跑完的时间再 drop。
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     let probe = biliup_relay::storage::init(&harness.data_dir, harness.init.key_file.as_deref())
         .expect("复用已打开的存储");
     let weak = std::sync::Arc::downgrade(&probe);
     drop(probe);
+
+    assert_eq!(
+        relay.spawn_monitor_loop_with(|| async {}),
+        biliup_relay::MonitorSpawnOutcome::Started
+    );
+    assert_eq!(
+        relay.stop_monitor_loop().await,
+        biliup_relay::MonitorStopOutcome::Stopped,
+        "停机必须等到监控线程完成收尾，而不是靠固定等待"
+    );
 
     drop(relay);
 

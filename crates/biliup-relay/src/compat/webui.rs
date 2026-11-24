@@ -310,7 +310,7 @@ pub mod state {
         cached_status.bilibili.room = cfg.bililive.room.into();
         cached_status.bilibili.enable_danmaku_command = cfg.bililive.enable_danmaku_command;
 
-        if platform_channel_configured(&cfg.youtube.channel_name, &cfg.youtube.channel_id) {
+        if platform_monitored(cfg.youtube.enable_monitor, &cfg.youtube.channel_id) {
             let yt_area_name = crate::plugins::area_name_or_unknown(cfg.youtube.area_v2);
             if cached_status
                 .youtube
@@ -351,7 +351,7 @@ pub mod state {
             cached_status.youtube = None;
         }
 
-        if platform_channel_configured(&cfg.twitch.channel_name, &cfg.twitch.channel_id) {
+        if platform_monitored(cfg.twitch.enable_monitor, &cfg.twitch.channel_id) {
             let tw_area_name = crate::plugins::area_name_or_unknown(cfg.twitch.area_v2);
             if cached_status
                 .twitch
@@ -473,8 +473,9 @@ pub mod state {
         }
     }
 
-    fn platform_channel_configured(channel_name: &str, channel_id: &str) -> bool {
-        !channel_name.trim().is_empty() || !channel_id.trim().is_empty()
+    /// 与运行态卡片同一道门：开关关掉或频道为空时不展示该平台。
+    fn platform_monitored(enable_monitor: bool, channel_id: &str) -> bool {
+        enable_monitor && !channel_id.is_empty()
     }
 }
 
@@ -570,13 +571,22 @@ mod tests {
 
         assert_eq!(status.bilibili.room, 4321);
         assert!(status.bilibili.enable_danmaku_command);
-        let youtube = status.youtube.expect("youtube 状态必须写入");
+        let youtube = status.youtube.as_ref().expect("youtube 状态必须写入");
         assert_eq!(youtube.channel_id, "ytid");
         assert!(youtube.enable_monitor);
         assert_eq!(
-            status.priority_channel.expect("优先频道状态").channel_name,
+            status
+                .priority_channel
+                .as_ref()
+                .expect("优先频道状态")
+                .channel_name,
             "priority"
         );
+
+        // 与运行态卡片同一道门：监控关掉后配置刷新必须清掉该平台卡片。
+        cfg.youtube.enable_monitor = false;
+        apply_status_cache_config(&mut status, &cfg);
+        assert!(status.youtube.is_none(), "关闭监控的平台不得留在状态缓存里");
     }
 
     #[tokio::test]

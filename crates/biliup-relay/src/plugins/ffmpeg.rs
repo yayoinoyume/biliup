@@ -3279,6 +3279,10 @@ pub fn set_high_priority(pid: u32) {
     }
 }
 
+/// 引擎是进程级单例，所有会动推流/弹幕的测试共用这把锁。
+#[cfg(test)]
+pub(crate) static FFMPEG_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4307,9 +4311,7 @@ mod tests {
         });
     }
 
-    lazy_static::lazy_static! {
-        static ref FFMPEG_COUNTER_TEST_LOCK: StdMutex<()> = StdMutex::new(());
-    }
+    // 引擎是进程级单例：本模块与 RelayService 的生命周期测试共用一把锁。
 
     #[cfg(target_os = "linux")]
     async fn wait_exited(pid: u32) -> bool {
@@ -4331,7 +4333,7 @@ mod tests {
     /// Fencing resets the shared counters, and the process supervisor is global,
     /// so these tests hold the counter lock for the whole runtime.
     pub(super) fn run_supervisor_test(test: impl Future<Output = ()>) {
-        let _guard = FFMPEG_COUNTER_TEST_LOCK.lock().unwrap();
+        let _guard = crate::plugins::ffmpeg::FFMPEG_TEST_GUARD.lock().unwrap();
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -4681,7 +4683,7 @@ mod tests {
 
     #[test]
     fn total_byte_counter_ignores_non_monotonic_push_samples() {
-        let _guard = FFMPEG_COUNTER_TEST_LOCK.lock().unwrap();
+        let _guard = crate::plugins::ffmpeg::FFMPEG_TEST_GUARD.lock().unwrap();
         reset_ffmpeg_tracking_state();
         FFMPEG_TOTAL_BYTES.store(2_000, Ordering::Relaxed);
         FFMPEG_LAST_SAMPLE_MS.store(now_millis().saturating_sub(1_000), Ordering::Relaxed);
@@ -4696,7 +4698,7 @@ mod tests {
 
     #[test]
     fn total_byte_counter_ignores_too_fast_push_samples() {
-        let _guard = FFMPEG_COUNTER_TEST_LOCK.lock().unwrap();
+        let _guard = crate::plugins::ffmpeg::FFMPEG_TEST_GUARD.lock().unwrap();
         reset_ffmpeg_tracking_state();
         FFMPEG_TOTAL_BYTES.store(1_000, Ordering::Relaxed);
         FFMPEG_LAST_SAMPLE_MS.store(now_millis(), Ordering::Relaxed);

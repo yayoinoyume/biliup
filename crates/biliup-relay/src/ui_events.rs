@@ -39,6 +39,7 @@ pub fn subscribe() -> broadcast::Receiver<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -46,17 +47,41 @@ mod tests {
         SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// 其它测试可能同时往同一条全局总线发事件，只认目标事件。
+    fn recv_until(rx: &mut broadcast::Receiver<&'static str>, expected: &'static str) -> bool {
+        let started = Instant::now();
+        loop {
+            match rx.try_recv() {
+                Ok(kind) if kind == expected => return true,
+                Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    if started.elapsed() > Duration::from_secs(1) {
+                        return false;
+                    }
+                    std::thread::yield_now();
+                }
+                Err(broadcast::error::TryRecvError::Closed) => return false,
+            }
+        }
+    }
+
     #[test]
     fn publish_reaches_every_subscriber_with_the_exact_kind() {
         let _guard = serial();
         let mut rx = subscribe();
         publish(STATUS);
-        assert_eq!(rx.try_recv().expect("status 事件"), STATUS);
+        assert!(recv_until(&mut rx, STATUS), "status 事件必须到达订阅端");
 
         let mut history_rx = subscribe();
         publish(HISTORY);
-        assert_eq!(history_rx.try_recv().expect("history 事件"), HISTORY);
-        assert_eq!(rx.try_recv().expect("status 订阅端也应收到 history"), HISTORY);
+        assert!(
+            recv_until(&mut history_rx, HISTORY),
+            "history 事件必须到达订阅端"
+        );
+        assert!(
+            recv_until(&mut rx, HISTORY),
+            "先订阅的接收端也必须收到 history"
+        );
     }
 
     #[test]
@@ -76,4 +101,3 @@ mod tests {
         );
     }
 }
-

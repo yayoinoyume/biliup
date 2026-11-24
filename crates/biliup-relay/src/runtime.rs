@@ -1657,6 +1657,18 @@ struct RawCandidates {
     priority_twitch: StreamCandidate,
 }
 
+/// A pass starts from this card: the configured room plus the danmaku switch.
+///
+/// Everything else comes from `apply_live_status`; `room` must not fall back to
+/// the `Default` zero, or the overview card loses its link to the live room.
+fn new_bili_status(cfg: &bilistream::config::Config) -> bilistream::BiliStatus {
+    bilistream::BiliStatus {
+        room: cfg.bililive.room.into(),
+        enable_danmaku_command: cfg.bililive.enable_danmaku_command,
+        ..Default::default()
+    }
+}
+
 /// Publish this pass's probe answers to the admin status cache.
 ///
 /// The field mapping and the "configured?" gates are the original literal,
@@ -2865,10 +2877,7 @@ pub(crate) async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn
         let bili_is_live = bili_live.is_live;
         let bili_title = bili_live.title.clone();
         let bili_area_id = bili_live.area_id;
-        let mut bili_status = bilistream::BiliStatus {
-            enable_danmaku_command: cfg.bililive.enable_danmaku_command,
-            ..Default::default()
-        };
+        let mut bili_status = new_bili_status(&cfg);
         bili_status.apply_live_status(&bili_live);
 
         publish_webui_status(&cfg, bili_status, &sources);
@@ -5597,5 +5606,18 @@ mod tests {
         assert!(!should_probe_priority(&cfg, &current_priority, &clear));
         cfg.priority_channel.enabled = false;
         assert!(!should_probe_priority(&cfg, &other, &clear));
+    }
+
+    #[test]
+    fn status_pass_carries_the_configured_room() {
+        let mut cfg = crate::test_support::config("p2-01-r2", 0);
+        cfg.bililive.room = 4321;
+        cfg.bililive.enable_danmaku_command = true;
+
+        let status = new_bili_status(&cfg);
+
+        assert_eq!(status.room, 4321, "房间号必须来自配置，不能是 Default 的 0");
+        assert!(status.enable_danmaku_command);
+        assert!(status.title.is_empty(), "其余字段仍由本轮探测填写");
     }
 }

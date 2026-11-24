@@ -253,9 +253,10 @@ impl RelayService {
                 plugins::stop_danmaku().await;
                 runtime::graceful_shutdown().await;
             });
-            // 先放掉收尾标志，再宣告清理完成：新一轮循环只看前者。
-            thread_pending.store(false, Ordering::SeqCst);
+            // 先宣告清理完成，再撤销占位：停机侧在占位后总会复查 cleaned，
+            // 这个顺序保证任何交错都收敛到「占位已撤销」，不会永久拒启。
             thread_cleaned.store(true, Ordering::SeqCst);
+            thread_pending.store(false, Ordering::SeqCst);
         });
         inner.monitor = Some(Monitor {
             stop,
@@ -272,16 +273,30 @@ impl RelayService {
 
     /// 通知并等待监控循环停止，使用默认停机上限。
     pub async fn stop_monitor_loop(&self) -> MonitorStopOutcome {
-        self.stop_monitor_loop_with_timeout(MONITOR_STOP_TIMEOUT)
-            .await
+        self.stop_monitor_loop_inner(MONITOR_STOP_TIMEOUT).await.0
     }
 
     /// 通知并等待监控循环停止；超时返回 `TimedOut` 并保留收尾标志，
     /// 期间新的监控循环会被拒绝启动，直到旧线程自己完成清理。
     pub async fn stop_monitor_loop_with_timeout(&self, timeout: Duration) -> MonitorStopOutcome {
-        let monitor = lock(&self.inner).monitor.take();
+        self.stop_monitor_loop_inner(timeout).await.0
+    }
+
+    /// 停机主体：占位与 `take()` 同锁完成，等待期间不会漏放新代。
+    /// 返回结果与本次停下的代次，供 shutdown 按代兜底。
+    async fn stop_monitor_loop_inner(&self, timeout: Duration) -> (MonitorStopOutcome, Option<u64>) {
+        let monitor = {
+            let mut inner = lock(&self.inner);
+            let monitor = inner.monitor.take();
+            if monitor.is_some() {
+                // 占位必须和 take 在同一临界区：否则等待窗口内新 spawn 会放行，
+                // 旧线程收尾时的全局停机会误杀新代推流。
+                inner.cleanup_pending.store(true, Ordering::SeqCst);
+            }
+            monitor
+        };
         let Some(mut monitor) = monitor else {
-            return MonitorStopOutcome::NotRunning;
+            return (MonitorStopOutcome::NotRunning, None);
         };
         let epoch = monitor.epoch;
         let _ = monitor.stop.send(true);
@@ -295,13 +310,14 @@ impl RelayService {
             }
         }
         if !cleaned.load(Ordering::SeqCst) {
-            // 旧线程还在收尾：只标记它自己那一代，不碰可能已经启动的新循环。
-            cleanup_pending.store(true, Ordering::SeqCst);
-            return MonitorStopOutcome::TimedOut;
+            // 线程仍在收尾：保留占位，由它的终态复位；所有权留到 shutdown 兜底。
+            return (MonitorStopOutcome::TimedOut, Some(epoch));
         }
+        // 线程已收尾（或在本次等待里刚收尾）：撤销占位并释放本代所有权。
+        cleanup_pending.store(false, Ordering::SeqCst);
         let mut inner = lock(&self.inner);
         release_engine_ownership(&mut inner, epoch);
-        MonitorStopOutcome::Stopped
+        (MonitorStopOutcome::Stopped, Some(epoch))
     }
 
     /// 优雅停机：先停监控循环，再停该循环启动的弹幕与推流，最后释放存储句柄，
@@ -310,14 +326,28 @@ impl RelayService {
     /// 弹幕与推流是进程级单例，只在本服务还持有引擎停机责任时才动它们，
     /// 避免同进程里误停不是自己发起的引擎。
     pub async fn shutdown(&self) {
-        self.stop_monitor_loop().await;
-        if lock(&self.inner).engine_owned {
-            // 监控线程没能自己收尾（超时/异常）时，这里按同一顺序补跑。
-            plugins::stop_danmaku().await;
-            runtime::graceful_shutdown().await;
-            let mut inner = lock(&self.inner);
-            inner.engine_owned = false;
-            inner.engine_owned_epoch = None;
+        let (outcome, stopped_epoch) = self.stop_monitor_loop_inner(MONITOR_STOP_TIMEOUT).await;
+        let cleanup_epoch = match outcome {
+            MonitorStopOutcome::TimedOut => stopped_epoch,
+            // 上一轮已经 take 走线程并超时：所有权仍挂在那一代上。
+            MonitorStopOutcome::NotRunning => lock(&self.inner).engine_owned_epoch,
+            MonitorStopOutcome::Stopped => None,
+        };
+        if let Some(epoch) = cleanup_epoch {
+            let owned = {
+                let inner = lock(&self.inner);
+                inner.engine_owned && inner.engine_owned_epoch == Some(epoch)
+            };
+            if owned {
+                // 监控线程没能自己收尾（超时/异常）时，这里按同一顺序补跑。
+                plugins::stop_danmaku().await;
+                runtime::graceful_shutdown().await;
+                let mut inner = lock(&self.inner);
+                if inner.engine_owned_epoch == Some(epoch) {
+                    inner.engine_owned = false;
+                    inner.engine_owned_epoch = None;
+                }
+            }
         }
         let held = {
             let mut inner = lock(&self.inner);
@@ -339,11 +369,13 @@ impl Drop for RelayService {
             .inner
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // 边界：只有监控线程真的跑完（cleaned 已置位）且没有待收尾的清理，
-        // 才敢动全局存储；线程仍在运行或仍在收尾时保留句柄，交给 shutdown。
-        let cleanup_done = inner.monitor.as_ref().is_some_and(|monitor| {
-            monitor.is_finished() && monitor.cleaned.load(Ordering::SeqCst)
-        }) && !inner.cleanup_pending.load(Ordering::SeqCst);
+        // 边界：没有待收尾的清理、且监控线程已跑完（或从未启动）时才动全局
+        // 存储。stop 超时后线程已自行收尾的情况也走这里释放。
+        let cleanup_done = !inner.cleanup_pending.load(Ordering::SeqCst)
+            && inner
+                .monitor
+                .as_ref()
+                .is_none_or(|monitor| monitor.is_finished());
         if inner.engine_owned && !cleanup_done {
             return;
         }
@@ -505,13 +537,54 @@ mod tests {
         let started = std::time::Instant::now();
         loop {
             let outcome = relay.spawn_monitor_loop_with(|| async {});
-            if outcome != MonitorSpawnOutcome::CleanupPending
-                || started.elapsed() > Duration::from_secs(5)
-            {
+            if outcome != MonitorSpawnOutcome::CleanupPending {
                 return outcome;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "等待旧线程收尾超时：{:?}",
+                started.elapsed()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    async fn wait_until_monitor_cleaned(relay: &RelayService) {
+        let started = std::time::Instant::now();
+        loop {
+            {
+                let inner = lock(&relay.inner);
+                let done = !inner.cleanup_pending.load(Ordering::SeqCst)
+                    && inner
+                        .monitor
+                        .as_ref()
+                        .is_some_and(|monitor| monitor.cleaned.load(Ordering::SeqCst));
+                if done {
+                    return;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "等待监控收尾超时：{:?}",
+                started.elapsed()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    fn gated_monitor() -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+        impl FnOnce() -> std::future::Ready<()> + Send + 'static,
+    ) {
+        let (started, monitor_started) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let task = move || {
+            let _ = started.send(());
+            let _ = released.recv();
+            std::future::ready(())
+        };
+        (monitor_started, release, task)
     }
 
     #[test]
@@ -536,6 +609,10 @@ mod tests {
         let _store = storage::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 引擎是进程级单例：与 ffmpeg 的生命周期测试互斥，避免互相清空推流。
+        let _engine = crate::plugins::ffmpeg::FFMPEG_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_dir, relay) = boot_relay_for_monitor().await;
 
         assert_eq!(
@@ -548,18 +625,19 @@ mod tests {
             MonitorSpawnOutcome::Started
         );
         assert_eq!(
+            relay.spawn_monitor_loop_with(|| async {}),
+            MonitorSpawnOutcome::AlreadyRunning
+        );
+        assert_eq!(
             relay
                 .stop_monitor_loop_with_timeout(Duration::from_secs(5))
                 .await,
             MonitorStopOutcome::Stopped
         );
 
-        let (started, monitor_started) = tokio::sync::oneshot::channel();
+        let (monitor_started, release, task) = gated_monitor();
         assert_eq!(
-            relay.spawn_monitor_loop_with(move || async move {
-                let _ = started.send(());
-                std::thread::sleep(Duration::from_millis(400));
-            }),
+            relay.spawn_monitor_loop_with(task),
             MonitorSpawnOutcome::Started
         );
         monitor_started.await.expect("监控任务必须进入监控分支");
@@ -574,6 +652,7 @@ mod tests {
             relay.spawn_monitor_loop_with(|| async {}),
             MonitorSpawnOutcome::CleanupPending
         );
+        release.send(()).expect("放行旧线程");
         assert_eq!(
             spawn_once_cleanup_finishes(&relay).await,
             MonitorSpawnOutcome::Started
@@ -588,42 +667,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_stop_never_clears_the_new_monitor_epoch() {
+    async fn a_running_stop_rejects_a_new_monitor_until_the_thread_finishes() {
         let _serial = ENGINE_SERIAL.lock().await;
         let _store = storage::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 引擎是进程级单例：与 ffmpeg 的生命周期测试互斥，避免互相清空推流。
+        let _engine = crate::plugins::ffmpeg::FFMPEG_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_dir, relay) = boot_relay_for_monitor().await;
 
-        let (started, monitor_started) = tokio::sync::oneshot::channel();
+        let (monitor_started, release, task) = gated_monitor();
         assert_eq!(
-            relay.spawn_monitor_loop_with(move || async move {
-                let _ = started.send(());
-                std::thread::sleep(Duration::from_millis(300));
-            }),
+            relay.spawn_monitor_loop_with(task),
             MonitorSpawnOutcome::Started
         );
         monitor_started.await.expect("监控任务必须进入监控分支");
 
-        let stop = relay.stop_monitor_loop_with_timeout(Duration::from_secs(5));
-        let interleave = async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            relay.spawn_monitor_loop_with(|| async {
-                tokio::time::sleep(Duration::from_millis(80)).await;
-            })
+        let stop = async { relay.stop_monitor_loop_with_timeout(Duration::from_secs(10)).await };
+        let probe = async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let outcome = loop {
+                match relay.spawn_monitor_loop_with(|| async {}) {
+                    MonitorSpawnOutcome::CleanupPending => {
+                        break MonitorSpawnOutcome::CleanupPending
+                    }
+                    other => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "等待窗口内不得放行新代：{other:?}"
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                }
+            };
+            release.send(()).expect("放行旧线程");
+            outcome
         };
-        let (outcome, spawned) = tokio::join!(stop, interleave);
+        let (stopped, rejected) = tokio::join!(stop, probe);
 
-        assert_eq!(spawned, MonitorSpawnOutcome::Started);
-        assert_eq!(outcome, MonitorStopOutcome::Stopped);
-        let inner = lock(&relay.inner);
-        assert!(inner.engine_owned, "旧 stop 不得抹掉新 spawn 的所有权");
-        assert_eq!(inner.engine_owned_epoch, Some(2));
-        drop(inner);
+        assert_eq!(rejected, MonitorSpawnOutcome::CleanupPending);
+        assert_eq!(stopped, MonitorStopOutcome::Stopped);
+
+        // 代际隔离：旧代（epoch=1）的释放不得清掉新代（epoch=2）的所有权。
+        assert_eq!(
+            relay.spawn_monitor_loop_with(|| async {}),
+            MonitorSpawnOutcome::Started
+        );
+        {
+            let mut inner = lock(&relay.inner);
+            assert!(inner.engine_owned);
+            assert_eq!(inner.engine_owned_epoch, Some(2));
+            release_engine_ownership(&mut inner, 1);
+            assert!(inner.engine_owned, "旧代 release 不得清除新代所有权");
+            assert_eq!(inner.engine_owned_epoch, Some(2));
+        }
 
         relay
             .stop_monitor_loop_with_timeout(Duration::from_secs(5))
             .await;
         relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drop_releases_storage_after_the_monitor_finishes() {
+        let _serial = ENGINE_SERIAL.lock().await;
+        let _store = storage::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 引擎是进程级单例：与 ffmpeg 的生命周期测试互斥，避免互相清空推流。
+        let _engine = crate::plugins::ffmpeg::FFMPEG_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (dir, relay) = boot_relay_for_monitor().await;
+
+        assert_eq!(
+            relay.spawn_monitor_loop_with(|| async {}),
+            MonitorSpawnOutcome::Started
+        );
+        wait_until_monitor_cleaned(&relay).await;
+
+        let probe = storage::global().expect("存储应已打开");
+        let weak = Arc::downgrade(&probe);
+        drop(probe);
+
+        drop(relay);
+
+        assert!(
+            weak.upgrade().is_none(),
+            "监控已收尾时 drop 必须立刻释放全局存储句柄"
+        );
+        let reopened = RelayService::new();
+        reopened
+            .start(RelayInitConfig {
+                data_dir: dir.path().join("relay"),
+                key_file: Some(dir.path().join("keys/master.key")),
+                ffmpeg_path: None,
+            })
+            .await
+            .expect("drop 之后应能立刻重开存储");
+        reopened.shutdown().await;
     }
 }
