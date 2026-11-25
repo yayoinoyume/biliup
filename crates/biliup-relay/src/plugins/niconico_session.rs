@@ -217,12 +217,25 @@ impl Drop for SessionWorker {
     }
 }
 
+/// spawn 期间临时持有守卫：panic 展开时把“已启动”标志放回去，
+/// 否则一次失败的 spawn 会让会话检查永久起不来。
+struct ArmedGuard;
+
+impl Drop for ArmedGuard {
+    fn drop(&mut self) {
+        SESSION_WORKER_STARTED.store(false, Ordering::SeqCst);
+    }
+}
+
 /// 与其余 7 个 worker 一致的单例守卫：同进程只允许一个会话检查循环。
 pub fn start_session_worker() -> Option<SessionWorker> {
+    // 先确认上下文里有运行时：没有时 tokio::spawn 会 panic，守卫一旦置位就再也复位不了。
+    let handle = tokio::runtime::Handle::try_current().ok()?;
     if SESSION_WORKER_STARTED.swap(true, Ordering::SeqCst) {
         return None;
     }
-    Some(SessionWorker(tokio::spawn(async {
+    let armed = ArmedGuard;
+    let task = handle.spawn(async {
         loop {
             let cfg = crate::config::load_config().await.ok();
             if let Some(cfg) = cfg.filter(|cfg| cfg.niconico.session_check_enabled) {
@@ -230,12 +243,20 @@ pub fn start_session_worker() -> Option<SessionWorker> {
             }
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
-    })))
+    });
+    std::mem::forget(armed);
+    Some(SessionWorker(task))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 没有运行时上下文时必须返回 None 而不是 panic：panic 会把单例守卫永久卡在 true。
+    #[test]
+    fn starting_outside_a_runtime_does_not_latch_the_singleton_guard() {
+        assert!(start_session_worker().is_none());
+    }
+
     #[test]
     fn authenticated_probe_has_web_client_headers_and_a_sensitive_cookie() {
         crate::install_crypto_provider();

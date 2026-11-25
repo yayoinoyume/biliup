@@ -96,8 +96,6 @@ impl ApplicationController {
 
         // 启动HTTP服务器
         let addr = listener.local_addr().change_context(AppError::Unknown)?;
-        // WebSub 的回调监听要避开面板端口，先把真实端口登记进去。
-        biliup_relay::plugins::youtube_websub::set_webui_port(addr.port());
         info!("routes initialized, listening on {}", addr);
 
         axum::serve(

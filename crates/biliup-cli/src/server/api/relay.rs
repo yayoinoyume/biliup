@@ -291,15 +291,59 @@ async fn watch_session(backend: Backend, user_id: i64, auth_hash: Vec<u8>, inter
 
 /// 更短的会话复查间隔：只在显式设置 `BILISTREAM_SSE_RECHECK_MS` 时生效。
 ///
-/// 下限 100ms：再快就是紧循环狂查数据库；上限 30s：再慢不比宿主自己的复查快，
-/// 没有意义。区间外一律忽略，回落默认（只走宿主的会话通道）。
+/// 下限 100ms：再快就是紧循环狂查数据库；上限是开区间：只有严格小于宿主自己的
+/// 30 秒复查才有意义，正好 30000 与宿主同拍、并联纯属白查一次。区间外一律忽略，
+/// 回落默认（只走宿主的会话通道）。
 fn sse_recheck_override() -> Option<Duration> {
     let millis = std::env::var("BILISTREAM_SSE_RECHECK_MS")
         .ok()?
         .trim()
         .parse::<u64>()
         .ok()?;
-    (100..=30_000)
+    (100..30_000)
         .contains(&millis)
         .then(|| Duration::from_millis(millis))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EnvGuard(Option<std::ffi::OsString>);
+
+    impl EnvGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os("BILISTREAM_SSE_RECHECK_MS");
+            unsafe { std::env::set_var("BILISTREAM_SSE_RECHECK_MS", value) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("BILISTREAM_SSE_RECHECK_MS", value),
+                    None => std::env::remove_var("BILISTREAM_SSE_RECHECK_MS"),
+                }
+            }
+        }
+    }
+
+    fn override_for(value: &str) -> Option<Duration> {
+        let _guard = EnvGuard::set(value);
+        sse_recheck_override()
+    }
+
+    #[test]
+    fn sse_recheck_override_only_joins_a_strictly_shorter_interval() {
+        assert_eq!(override_for("100"), Some(Duration::from_millis(100)));
+        assert_eq!(override_for("29999"), Some(Duration::from_millis(29_999)));
+        // 30000 与宿主复查同拍，并联拿不到更快的结果，必须忽略。
+        assert_eq!(override_for("30000"), None);
+        assert_eq!(override_for("99"), None);
+        assert_eq!(override_for("30001"), None);
+        assert_eq!(override_for(""), None);
+        assert_eq!(override_for("slow"), None);
+    }
 }

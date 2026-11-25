@@ -111,6 +111,8 @@ pub async fn serve_on(
     let addr = listener.local_addr().change_context(AppError::Unknown)?;
     validate_server_exposure(addr, auth)?;
     server::fleet::reject_config_file(config_path.as_deref())?;
+    // WebSub 的回调监听要避开面板端口：转播底座启动前就得把真实端口登记进去。
+    biliup_relay::plugins::youtube_websub::set_webui_port(addr.port());
 
     // let config = Arc::new(AppConfig::parse());
 

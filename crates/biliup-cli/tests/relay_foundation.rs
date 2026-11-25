@@ -91,8 +91,9 @@ async fn try_request(
 /// 直接丢弃响应（不再回任何字节），所以写任务写完先等一个放行信号再关。
 ///
 /// RST 仍可能把已经写出的 413 在内核里丢掉（这是 TCP 的时序，不是服务端没回）。
-/// 这种情况下重开一条连接重试，判据不变：只有真正解析出状态行才算数，
-/// 绝不把 RST 当成 413。
+/// 调用方把超限量压到比上限多 1 字节，剩下的尾巴很小、更不容易触发 RST；
+/// 真丢了就重开一条连接重试，重试次数有限（3 次），判据不变：只有真正解析出
+/// 状态行才算数，绝不把 RST 当成 413。
 async fn oversized_status(port: u16, path: &str, cookie: &str, body: &str) -> u16 {
     for attempt in 1..=3 {
         if let Some(status) = oversized_status_once(port, path, cookie, body).await {
@@ -107,9 +108,13 @@ async fn oversized_status(port: u16, path: &str, cookie: &str, body: &str) -> u1
 }
 
 async fn oversized_status_once(port: u16, path: &str, cookie: &str, body: &str) -> Option<u16> {
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("连接测试服务");
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .expect("连接测试服务超时")
+    .expect("连接测试服务");
     let mut head = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: application/json\r\n",
         body.len()
@@ -118,7 +123,10 @@ async fn oversized_status_once(port: u16, path: &str, cookie: &str, body: &str) 
         head.push_str(&format!("Cookie: {cookie}\r\n"));
     }
     head.push_str("\r\n");
-    stream.write_all(head.as_bytes()).await.expect("写出请求头");
+    tokio::time::timeout(Duration::from_secs(10), stream.write_all(head.as_bytes()))
+        .await
+        .expect("写出请求头超时")
+        .expect("写出请求头");
     let (mut reader, mut writer) = stream.into_split();
     let payload = body.to_owned();
     let label = path.to_owned();
@@ -149,7 +157,10 @@ async fn oversized_status_once(port: u16, path: &str, cookie: &str, body: &str) 
     .await
     .expect("读取响应超时");
     let _ = finish.send(());
-    if let Ok(Some(error)) = writing.await {
+    let written = tokio::time::timeout(Duration::from_secs(10), writing)
+        .await
+        .expect("写请求体任务超时");
+    if let Ok(Some(error)) = written {
         match error.kind() {
             std::io::ErrorKind::BrokenPipe
             | std::io::ErrorKind::ConnectionReset
@@ -227,6 +238,13 @@ fn seed_min_config() {
     }))
     .expect("最小配置必须能反序列化");
     biliup_relay::storage::write_document("config.json", &seeded).expect("写入最小配置");
+}
+
+/// `manage/*` 的写端点要读 areas.json：缺文档时一律 500（数据不存在）。
+/// 补一份最小的合法文档，写入路径才是真的可写、而不是靠 500 蒙过去。
+fn seed_min_areas() {
+    biliup_relay::storage::write_document("areas.json", &serde_json::json!({ "areas": [] }))
+        .expect("写入最小分区文档");
 }
 
 async fn login(port: u16, username: &str, password: &str) -> String {
@@ -442,6 +460,7 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
     // /v1/relay/history/status 要读 config.json。直接写文档而不走向导路由：
     // 向导会 request_status_refresh() 唤醒状态轮询，进而真的去问 B 站（测试必须离线）。
     seed_min_config();
+    seed_min_areas();
     create_user(port, &admin, "op", "op-password", "operator").await;
     create_user(port, &admin, "ro", "ro-password", "viewer").await;
     let operator = login(port, "op", "op-password").await;
@@ -469,13 +488,10 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
             reply.body
         );
     }
+    // seed 之后这两个端点有东西可读：必须真的 200，不能靠“不是 4xx”蒙过去。
     for path in ["/v1/relay/config", "/v1/relay/manage/areas"] {
         let reply = request(port, "GET", path, Some(&viewer), "").await;
-        assert!(
-            !matches!(reply.status, 401 | 403 | 404 | 405),
-            "只读角色访问 {path} 被拒：{}",
-            reply.status
-        );
+        assert_eq!(reply.status, 200, "只读角色访问 {path}：{}", reply.body);
     }
     for (method, path) in [
         ("POST", "/v1/relay/stop"),
@@ -489,17 +505,26 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
         assert_eq!(reply.status, 403, "只读角色 {method} {path}");
     }
 
+    // 停播会真的外呼 B 站 stopLive：离线只要求它走到处理器（200 成功 / 500 外呼失败），
+    // 被权限墙拦下才是 401/403/404/405。
+    let halted = request(port, "POST", "/v1/relay/stop", Some(&operator), "").await;
+    assert!(
+        matches!(halted.status, 200 | 500),
+        "操作员访问 POST /v1/relay/stop：{} {}",
+        halted.status,
+        halted.body
+    );
     for (method, path) in [
         ("GET", "/v1/relay/status"),
-        ("POST", "/v1/relay/stop"),
         ("POST", "/v1/relay/history/clean"),
         ("GET", "/v1/relay/refresh/youtube"),
     ] {
         let reply = request(port, method, path, Some(&operator), "").await;
         assert!(
-            !matches!(reply.status, 401 | 403 | 404 | 405),
-            "操作员访问 {method} {path} 被拒：{}",
-            reply.status
+            !matches!(reply.status, 401 | 403 | 404 | 405 | 500),
+            "操作员访问 {method} {path} 被拒或报错：{} {}",
+            reply.status,
+            reply.body
         );
     }
     for (method, path) in [
@@ -526,9 +551,10 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
     ] {
         let reply = request(port, method, path, Some(&admin), body).await;
         assert!(
-            !matches!(reply.status, 401 | 403 | 404 | 405),
-            "超管访问 {method} {path} 被拒：{}",
-            reply.status
+            !matches!(reply.status, 401 | 403 | 404 | 405 | 500),
+            "超管访问 {method} {path} 被拒或报错：{} {}",
+            reply.status,
+            reply.body
         );
     }
     for (method, path) in [
@@ -544,7 +570,11 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
         "A".repeat(3 * 1024 * 1024)
     );
     let restore = oversized_status(port, "/v1/relay/storage/restore", &admin, &oversized).await;
-    assert_ne!(restore, 413, "存储恢复必须放行 48MiB 以内的请求体");
+    // 3MiB 体必须真的进到处理器：它自己按“备份格式无效”回 400（不是 413、也不是 500）。
+    assert_eq!(
+        restore, 400,
+        "存储恢复必须放行 48MiB 以内的请求体并由处理器拒绝无效备份"
+    );
     // 只比默认上限多一个字节：服务端会把整个请求体读掉才报 413，关连接时它的
     // 接收缓冲区是空的，于是正常 FIN 而不会用 RST 把 413 打掉。多送 1MiB 时
     // 剩余字节会让服务端以 RST 收场，响应可能被内核丢掉（r1 放行失败就是这个）。

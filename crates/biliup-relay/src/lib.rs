@@ -407,10 +407,19 @@ impl RelayService {
     pub async fn shutdown(&self) {
         // 后台 worker 先退出：之后的统计库与存储关停不得与运行中的任务相撞。
         // 句柄在锁内取出、在锁外释放，停机期间不占着 inner 的互斥量。
-        let workers = { lock(&self.inner).workers.take() };
+        // ready 必须和 take 在同一临界区里一同落下：否则并发的 start() 会看到
+        // 仍为 true 的 ready 直接返回 Ok，等本函数收尾后服务其实已经停了。
+        let workers = {
+            let mut inner = lock(&self.inner);
+            inner.ready = false;
+            inner.state = String::from(STATE_STOPPED);
+            inner.workers.take()
+        };
         if let Some(workers) = workers {
             workers.stop();
         }
+        // WebSub 回调端口登记随服务复位，同进程再启动时不会残留上一轮的面板端口。
+        plugins::youtube_websub::set_webui_port(0);
         let (outcome, stopped_epoch) = self.stop_monitor_loop_inner(MONITOR_STOP_TIMEOUT).await;
         let cleanup_epoch = match outcome {
             MonitorStopOutcome::TimedOut => stopped_epoch,
@@ -446,10 +455,11 @@ impl RelayService {
         }
         let held = {
             let mut inner = lock(&self.inner);
-            let held = inner.storage.take().is_some();
-            inner.ready = false;
-            inner.state = String::from(STATE_STOPPED);
-            held
+            if inner.ready {
+                // 收尾期间并发 start() 已经把服务重新拉起：存储归它，不能替它关。
+                return;
+            }
+            inner.storage.take().is_some()
         };
         if held {
             storage::shutdown();
@@ -652,6 +662,30 @@ mod tests {
                 "第 {round} 轮 shutdown 必须先释放全部 worker 句柄"
             );
         }
+    }
+
+    /// 停机必须把 WebSub 的面板端口登记复位：同进程再启动时不能残留旧端口。
+    #[tokio::test]
+    async fn shutdown_resets_the_webui_port_registration() {
+        let _guard = storage::lock_test_global();
+        let dir = tempfile::tempdir().unwrap();
+        let relay = RelayService::new();
+        relay
+            .start(RelayInitConfig {
+                data_dir: dir.path().join("relay"),
+                key_file: Some(dir.path().join("keys/master.key")),
+                ffmpeg_path: None,
+            })
+            .await
+            .expect("启动应成功");
+        plugins::youtube_websub::set_webui_port(41_234);
+        assert_eq!(plugins::youtube_websub::webui_port(), Some(41_234));
+        relay.shutdown().await;
+        assert_eq!(
+            plugins::youtube_websub::webui_port(),
+            None,
+            "停机必须复位 WebSub 的面板端口登记"
+        );
     }
 
     async fn boot_relay_for_monitor() -> (tempfile::TempDir, RelayService) {
