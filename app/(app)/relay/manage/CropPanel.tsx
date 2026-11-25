@@ -33,6 +33,7 @@ export default function CropPanel({
   const crop = useSWR(['relay:crop', platform], () => relayGetCrop(platform), {
     revalidateOnFocus: false,
   })
+  const cropLoading = crop.isLoading && crop.data === undefined
   const [editing, setEditing] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [restarting, setRestarting] = useState(false)
@@ -92,17 +93,19 @@ export default function CropPanel({
                 裁掉黑边、留白或预录区域；坐标按抓帧原始像素计算。
               </Text>
             </div>
-            <Tag color={crop.data ? 'green' : 'grey'} size="small">
-              {crop.data ? '已启用' : '未启用'}
+            <Tag color={crop.data && !cropLoading ? 'green' : 'grey'} size="small">
+              {cropLoading ? '加载中…' : crop.data ? '已启用' : '未启用'}
             </Tag>
           </div>
 
           <dl className={styles.kv}>
             <dt className={styles.kvKey}>裁切区域</dt>
             <dd className={styles.kvValue}>
-              {crop.data
-                ? `${crop.data.width} × ${crop.data.height}，起点 (${crop.data.x}, ${crop.data.y})`
-                : '未配置裁剪'}
+              {cropLoading
+                ? '加载中…'
+                : crop.data
+                  ? `${crop.data.width} × ${crop.data.height}，起点 (${crop.data.x}, ${crop.data.y})`
+                  : '未配置裁剪'}
             </dd>
             <dt className={styles.kvKey}>抓帧来源</dt>
             <dd className={styles.kvValue}>
@@ -129,7 +132,7 @@ export default function CropPanel({
           </div>
         </section>
 
-        <HlsCacheEditor platform={platform} />
+        <HlsCacheEditor key={platform} platform={platform} />
       </div>
 
       {editing ? (

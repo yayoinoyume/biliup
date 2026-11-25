@@ -56,10 +56,10 @@ function AreaEditor({
   const applyCatalog = (areaId: number) => {
     setPicked(areaId)
     formApi.current?.setValue('id', areaId)
-    const match = (groups ?? [])
-      .flatMap((group) => group.areas)
-      .find((item) => item.id === areaId)
-    if (match) formApi.current?.setValue('name', match.name)
+    const match = (groups ?? []).flatMap((group) => group.areas).find((item) => item.id === areaId)
+    if (match && !String(formApi.current?.getValue('name') ?? '').trim()) {
+      formApi.current?.setValue('name', match.name)
+    }
   }
 
   const submit = async () => {
@@ -67,6 +67,11 @@ function AreaEditor({
     try {
       values = (await formApi.current?.validate()) as AreaValues
     } catch {
+      return
+    }
+    const name = values.name.trim()
+    if (!name) {
+      formApi.current?.setError('name', '请填写分区名称')
       return
     }
     const id = Number(values.id)
@@ -80,7 +85,7 @@ function AreaEditor({
     }
     const payload: RelayAddAreaRequest = {
       id,
-      name: values.name.trim(),
+      name,
       title_keywords: splitList(values.title_keywords),
       aliases: splitList(values.aliases),
     }
@@ -111,6 +116,9 @@ function AreaEditor({
           name: area?.name ?? '',
           title_keywords: joinList(area?.title_keywords),
           aliases: joinList(area?.aliases),
+        }}
+        onValueChange={(values) => {
+          if (picked !== null && Number(values.id) !== picked) setPicked(null)
         }}
         labelPosition="top"
       >

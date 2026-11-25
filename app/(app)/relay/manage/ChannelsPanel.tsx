@@ -59,19 +59,29 @@ function ChannelEditor({
     } catch {
       return
     }
-    const platforms: Record<string, string> = {}
+    const name = values.name.trim()
+    if (!name) {
+      formApi.current?.setError('name', '请填写频道名称')
+      return
+    }
+    const known: Record<string, string> = {}
     const youtube = values.youtube.trim()
     const twitch = values.twitch.trim()
     const niconico = values.niconico.trim()
-    if (youtube) platforms.youtube = youtube
-    if (twitch) platforms.twitch = twitch
-    if (niconico) platforms.niconico = niconico
-    if (Object.keys(platforms).length === 0) {
+    if (youtube) known.youtube = youtube
+    if (twitch) known.twitch = twitch
+    if (niconico) known.niconico = niconico
+    if (Object.keys(known).length === 0) {
       formApi.current?.setError('youtube', '至少填写一个平台的频道 ID')
       return
     }
+    const platforms: Record<string, string> = {}
+    for (const [key, id] of Object.entries(channel?.platforms ?? {})) {
+      if (key !== 'youtube' && key !== 'twitch' && key !== 'niconico') platforms[key] = id
+    }
+    Object.assign(platforms, known)
     const payload: RelayAddChannelRequest = {
-      name: values.name.trim(),
+      name,
       aliases: splitList(values.aliases),
       platforms,
       niconico_name: values.niconico_name.trim() || null,

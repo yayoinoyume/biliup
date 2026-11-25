@@ -16,24 +16,34 @@ const LATENCY_MAX = 60
 
 const CACHE_KEY = (platform: RelayCropPlatform) => ['relay:ffmpeg-cache', platform]
 
-type CacheDraft = { enabled: boolean; latency: number }
+type CacheDraft = { enabled: boolean; latency: number | string }
 
 export default function HlsCacheEditor({ platform }: { platform: RelayCropPlatform }) {
   const { can } = useMe()
   const canEdit = can('relay.config')
-  const { data, error, mutate } = useSWR(CACHE_KEY(platform), () => relayGetFfmpegCache(platform), {
+  const { data, error, isLoading, mutate } = useSWR(CACHE_KEY(platform), () => relayGetFfmpegCache(platform), {
     revalidateOnFocus: false,
   })
   const [draft, setDraft] = useState<CacheDraft | null>(null)
   const [saving, setSaving] = useState(false)
 
-  const server: CacheDraft = {
-    enabled: data?.enabled ?? false,
-    latency: data?.latency_secs ?? LATENCY_MIN,
-  }
+  const loaded = data !== undefined
+  const server: CacheDraft | null = loaded ? { enabled: data.enabled, latency: data.latency_secs } : null
   const value = draft ?? server
+  const latencyNumber =
+    value === null
+      ? Number.NaN
+      : typeof value.latency === 'number'
+        ? value.latency
+        : Number(String(value.latency).trim())
   const latencyValid =
-    Number.isInteger(value.latency) && value.latency >= LATENCY_MIN && value.latency <= LATENCY_MAX
+    Number.isInteger(latencyNumber) && latencyNumber >= LATENCY_MIN && latencyNumber <= LATENCY_MAX
+  const latencyHint =
+    loaded && value !== null && !latencyValid
+      ? String(value.latency).trim() === ''
+        ? '请填写延迟秒数'
+        : `延迟必须是 ${LATENCY_MIN} 到 ${LATENCY_MAX} 之间的整数秒`
+      : null
 
   const save = async () => {
     if (!latencyValid) {
@@ -44,8 +54,8 @@ export default function HlsCacheEditor({ platform }: { platform: RelayCropPlatfo
     try {
       const message = await relayUpdateFfmpegCache({
         platform,
-        enabled: value.enabled,
-        latency_secs: value.latency,
+        enabled: value?.enabled ?? false,
+        latency_secs: latencyNumber,
       })
       Toast.success(message ?? 'HLS 时移缓存已保存')
       void mutate()
@@ -67,16 +77,20 @@ export default function HlsCacheEditor({ platform }: { platform: RelayCropPlatfo
             先把直播切片缓存在本地再吐出，用固定延迟换更稳的推流；延迟越大越抗网络抖动。
           </Text>
         </div>
-        <Tag color={data?.enabled ? 'green' : 'grey'} size="small">
-          {data?.enabled ? '已启用' : '未启用'}
+        <Tag color={loaded && data.enabled ? 'green' : 'grey'} size="small">
+          {!loaded ? (isLoading ? '加载中…' : '未加载') : data.enabled ? '已启用' : '未启用'}
         </Tag>
       </div>
 
       <dl className={styles.kv}>
         <dt className={styles.kvKey}>当前状态</dt>
-        <dd className={styles.kvValue}>{data ? (data.enabled ? '启用' : '未启用') : '—'}</dd>
+        <dd className={styles.kvValue}>
+          {loaded ? (data.enabled ? '启用' : '未启用') : isLoading ? '加载中…' : '—'}
+        </dd>
         <dt className={styles.kvKey}>当前延迟</dt>
-        <dd className={styles.kvValue}>{data ? `${data.latency_secs} 秒` : '—'}</dd>
+        <dd className={styles.kvValue}>
+          {loaded ? `${data.latency_secs} 秒` : isLoading ? '加载中…' : '—'}
+        </dd>
       </dl>
 
       {error ? (
@@ -87,29 +101,28 @@ export default function HlsCacheEditor({ platform }: { platform: RelayCropPlatfo
 
       <div className={styles.toolbar}>
         <Switch
-          checked={value.enabled}
-          onChange={(next) => setDraft({ enabled: next, latency: value.latency })}
-          disabled={!canEdit}
+          checked={value?.enabled ?? false}
+          onChange={(next) => setDraft({ enabled: next, latency: value?.latency ?? LATENCY_MIN })}
+          disabled={!canEdit || !loaded}
           aria-label="启用 HLS 时移缓存"
         />
         <Text size="small">启用</Text>
         <InputNumber
-          value={value.latency}
-          min={LATENCY_MIN}
-          max={LATENCY_MAX}
-          step={1}
-          precision={0}
-          disabled={!canEdit || !value.enabled}
-          onChange={(next) => {
-            if (typeof next !== 'number' || !Number.isFinite(next)) return
-            setDraft({ enabled: value.enabled, latency: Math.round(next) })
-          }}
+          value={value?.latency ?? ''}
+          disabled={!canEdit || !loaded}
+          onChange={(next) => setDraft({ enabled: value?.enabled ?? false, latency: next })}
           style={{ width: 120 }}
           aria-label="时移延迟（秒）"
         />
-        <Text type="tertiary" size="small">
-          秒（{LATENCY_MIN}–{LATENCY_MAX}，整数）
-        </Text>
+        {latencyHint ? (
+          <Text type="danger" size="small">
+            {latencyHint}
+          </Text>
+        ) : (
+          <Text type="tertiary" size="small">
+            秒（{LATENCY_MIN}–{LATENCY_MAX}，整数）
+          </Text>
+        )}
         {canEdit ? (
           <Button
             theme="solid"

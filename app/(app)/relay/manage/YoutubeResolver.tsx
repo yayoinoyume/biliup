@@ -10,17 +10,50 @@ const { Text } = Typography
 
 const CHANNEL_ID = /^UC[\w-]{22}$/
 
+const PATH_SUFFIXES = new Set([
+  'videos',
+  'streams',
+  'featured',
+  'shorts',
+  'about',
+  'playlists',
+  'playlist',
+  'community',
+  'channels',
+  'live',
+  'posts',
+  'watch',
+  'results',
+  'feed',
+])
+
+function firstSegment(value: string): string {
+  return value.split(/[/?#]/)[0].trim()
+}
+
 export function youtubeNameFromInput(input: string): string {
   const value = input.trim()
   if (!value || CHANNEL_ID.test(value)) return ''
-  if (value.startsWith('@')) return value.slice(1).split(/[/?#]/)[0]
+  if (value.startsWith('@')) return firstSegment(value.slice(1))
+  if (!/[/.]/.test(value)) return value
+  let path = value
   try {
-    const url = new URL(value.startsWith('http') ? value : `https://${value}`)
-    const segment = url.pathname.split('/').filter(Boolean).pop() ?? ''
-    return segment.startsWith('@') ? segment.slice(1) : segment
+    const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`)
+    path = url.pathname
   } catch {
-    return value
+    return firstSegment(value)
   }
+  const segments = path.split('/').filter(Boolean)
+  if (segments.some((segment, index) => segment === 'channel' && CHANNEL_ID.test(segments[index + 1] ?? ''))) {
+    return ''
+  }
+  const handle = segments.find((segment) => segment.startsWith('@'))
+  if (handle) return handle.slice(1)
+  const last = segments[segments.length - 1] ?? ''
+  const previous = segments[segments.length - 2] ?? ''
+  const name = PATH_SUFFIXES.has(last.toLowerCase()) ? previous : last
+  if (!name || CHANNEL_ID.test(name)) return ''
+  return name.startsWith('@') ? name.slice(1) : name
 }
 
 export default function YoutubeResolver({

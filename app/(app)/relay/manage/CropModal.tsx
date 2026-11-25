@@ -25,6 +25,7 @@ type Notice = { type: 'danger' | 'warning' | 'success' | 'info'; text: string }
 type Draft = { enabled: boolean; rect: Rect }
 
 const EMPTY_RECT: Rect = { x: 0, y: 0, width: 0, height: 0 }
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 const PLATFORM_LABELS: Record<RelayCropPlatform, string> = {
   youtube: 'YouTube',
@@ -91,12 +92,14 @@ export default function CropModal({
   const dragRef = useRef<{ x: number; y: number } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
+  const loaded = crop.data !== undefined
   const serverRect = crop.data ?? EMPTY_RECT
   const serverEnabled = crop.data !== null && crop.data !== undefined
   const enabled = draft?.enabled ?? serverEnabled
   const rect = draft?.rect ?? serverRect
 
   const updateRect = (next: Rect | ((prev: Rect) => Rect)) => {
+    setSaved(false)
     setDraft((prev) => ({
       enabled: prev?.enabled ?? serverEnabled,
       rect: typeof next === 'function' ? next(prev?.rect ?? serverRect) : next,
@@ -137,6 +140,14 @@ export default function CropModal({
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setNotice({ type: 'danger', text: '只能选择图片文件（JPG、PNG 等）' })
+      return
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      setNotice({ type: 'danger', text: '静帧图片不能超过 10 MB，请压缩后再选' })
+      return
+    }
     const reader = new FileReader()
     reader.onload = () => {
       if (typeof reader.result !== 'string') {
@@ -173,6 +184,14 @@ export default function CropModal({
     if (!start || !frameSize) return
     const point = pointOf(event)
     if (point) setSelection(rectBetween(start, point, frameSize))
+  }
+
+  const cancelDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    dragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    setSelection(null)
   }
 
   const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -266,7 +285,7 @@ export default function CropModal({
       size="lg"
       visible={visible}
       okText={canEdit ? '保存裁剪' : undefined}
-      okDisabled={!canEdit}
+      okDisabled={!canEdit || !loaded}
       onOk={save}
       onCancel={onClose}
     >
@@ -280,32 +299,39 @@ export default function CropModal({
             description={relayErrorMessage(crop.error)}
           />
         ) : null}
+        {crop.isLoading && !loaded ? (
+          <Text type="tertiary" size="small">
+            正在读取现有裁剪配置…
+          </Text>
+        ) : null}
 
         <div className={base.toolbar}>
           {platform === 'niconico' ? (
             <Text type="tertiary" size="small">
               Niconico 无法从 HLS 抓帧，请选一张本地静帧，或直接按已知像素填坐标。
             </Text>
-          ) : (
+          ) : canCapture ? (
             <Button
               icon={<IconCamera />}
               loading={capturing}
-              disabled={!canCapture}
               onClick={() => {
                 void capture()
               }}
             >
               抓取当前画面
             </Button>
-          )}
-          <Button icon={<IconUpload />} onClick={() => fileRef.current?.click()}>
-            选择本地静帧
-          </Button>
-          <input ref={fileRef} type="file" accept="image/*" hidden onChange={pickFile} />
-          {platform !== 'niconico' && !canCapture ? (
+          ) : (
             <Text type="tertiary" size="small">
               实时抓帧需要「启停转播」权限。
             </Text>
+          )}
+          {canEdit ? (
+            <>
+              <Button icon={<IconUpload />} onClick={() => fileRef.current?.click()}>
+                选择本地静帧
+              </Button>
+              <input ref={fileRef} type="file" accept="image/*" hidden onChange={pickFile} />
+            </>
           ) : null}
         </div>
 
@@ -316,7 +342,7 @@ export default function CropModal({
             onPointerDown={startDrag}
             onPointerMove={moveDrag}
             onPointerUp={endDrag}
-            onPointerCancel={endDrag}
+            onPointerCancel={cancelDrag}
             role="img"
             aria-label={`${PLATFORM_LABELS[platform]} 画面预览，可拖拽框选裁剪区域`}
           >
@@ -334,11 +360,13 @@ export default function CropModal({
         ) : (
           <div className={styles.emptyPreview}>
             <Text type="tertiary" size="small">
-              {platform === 'niconico'
-                ? '还没有画面：选一张本地静帧后即可框选。'
-                : canCapture
-                  ? '点「抓取当前画面」拿到直播截图后框选，或直接填写已知的像素坐标。'
-                  : '暂无画面：没有抓帧权限时可以直接填写已知的像素坐标。'}
+              {!canEdit
+                ? '当前角色只能查看已保存的裁剪区域。'
+                : platform === 'niconico'
+                  ? '还没有画面：选一张本地静帧后即可框选。'
+                  : canCapture
+                    ? '点「抓取当前画面」拿到直播截图后框选，或直接填写已知的像素坐标。'
+                    : '暂无画面：没有抓帧权限时可以直接填写已知的像素坐标。'}
             </Text>
           </div>
         )}
@@ -346,8 +374,11 @@ export default function CropModal({
         <div className={base.toolbar}>
           <Switch
             checked={enabled}
-            onChange={(next) => setDraft({ enabled: next, rect })}
-            disabled={!canEdit}
+            onChange={(next) => {
+              setDraft({ enabled: next, rect })
+              setSaved(false)
+            }}
+            disabled={!canEdit || !loaded}
             aria-label="启用画面裁剪"
           />
           <Text size="small">启用裁剪</Text>
@@ -367,7 +398,7 @@ export default function CropModal({
               max={frameSize ? Math.max(0, frameSize.width - 1) : undefined}
               step={1}
               precision={0}
-              disabled={!canEdit || !enabled}
+              disabled={!canEdit || !loaded || !enabled}
               onChange={(next) => setField('x', next)}
               style={{ width: '100%' }}
             />
@@ -380,7 +411,7 @@ export default function CropModal({
               max={frameSize ? Math.max(0, frameSize.height - 1) : undefined}
               step={1}
               precision={0}
-              disabled={!canEdit || !enabled}
+              disabled={!canEdit || !loaded || !enabled}
               onChange={(next) => setField('y', next)}
               style={{ width: '100%' }}
             />
@@ -393,7 +424,7 @@ export default function CropModal({
               max={frameSize ? frameSize.width : undefined}
               step={1}
               precision={0}
-              disabled={!canEdit || !enabled}
+              disabled={!canEdit || !loaded || !enabled}
               onChange={(next) => setField('width', next)}
               style={{ width: '100%' }}
             />
@@ -406,7 +437,7 @@ export default function CropModal({
               max={frameSize ? frameSize.height : undefined}
               step={1}
               precision={0}
-              disabled={!canEdit || !enabled}
+              disabled={!canEdit || !loaded || !enabled}
               onChange={(next) => setField('height', next)}
               style={{ width: '100%' }}
             />
@@ -431,7 +462,9 @@ export default function CropModal({
           </div>
         ) : (
           <Text type="tertiary" size="small">
-            坐标按抓帧原始像素填写：x/y 是左上角，宽高必须落在画面内；保存后重启转播生效。
+            {canEdit
+              ? '坐标按抓帧原始像素填写：x/y 是左上角，宽高必须落在画面内；保存后重启转播生效。'
+              : '当前角色只能查看；修改需要「修改转播配置」权限。'}
           </Text>
         )}
       </div>
