@@ -227,7 +227,11 @@ fn write_atomic(dest: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+        if let Err(error) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)) {
+            drop(file);
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
     }
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         drop(file);
