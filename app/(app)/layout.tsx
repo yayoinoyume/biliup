@@ -115,6 +115,52 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     ],
   },
   {
+    title: '直播转播',
+    items: [
+      {
+        href: '/relay',
+        perm: 'relay.view',
+        label: '转播总览',
+        activeOn: ['/relay/setup'],
+        icon: (
+          <Ic
+            d="M12 10a2 2 0 100 4 2 2 0 000-4z"
+            extra="M7.5 7.5a6 6 0 000 9M16.5 7.5a6 6 0 010 9M4.5 4.5a10 10 0 000 15M19.5 4.5a10 10 0 010 15"
+          />
+        ),
+      },
+      {
+        href: '/relay/manage',
+        perm: 'relay.view',
+        label: '频道与分区',
+        icon: <Ic d="M3 6h18v5H3zM3 13h18v5H3z" extra="M7 8.5h.01M7 15.5h.01" />,
+      },
+      {
+        href: '/relay/settings',
+        perm: 'relay.config',
+        label: '转播设置',
+        icon: (
+          <Ic
+            d="M4 7h9M17 7h3M4 17h3M11 17h9"
+            extra="M15 7a2 2 0 104 0 2 2 0 00-4 0M7 17a2 2 0 104 0 2 2 0 00-4 0"
+          />
+        ),
+      },
+      {
+        href: '/relay/analytics',
+        perm: 'relay.view',
+        label: '推流统计',
+        icon: <Ic d="M4 20V10M10 20V4M16 20v-7M22 20H2" />,
+      },
+      {
+        href: '/relay/logs',
+        perm: 'relay.view',
+        label: '实时日志',
+        icon: <Ic d="M3 5h18v14H3z" extra="M7 10l3 2-3 2M13 14h4" />,
+      },
+    ],
+  },
+  {
     title: '设置',
     items: [
       { href: '/runtime', perm: 'streamer.view', label: '运行状态', icon: <Ic d="M3 12h4l3-8 4 16 3-8h4" /> },
@@ -153,6 +199,10 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
 
 /** 不在侧栏里、但同样需要权限的子页面（按前缀匹配，先匹配到的生效） */
 const EXTRA_PAGE_PERMS: { prefix: string; perm: Permission }[] = [
+  // 直播转播：最具体的在前，否则 /relay 会先吃掉 /relay/settings 与 /relay/setup
+  { prefix: '/relay/settings', perm: 'relay.config' },
+  { prefix: '/relay/setup', perm: 'relay.config' },
+  { prefix: '/relay', perm: 'relay.view' },
   { prefix: '/runtime/logs', perm: 'log.view' },
   { prefix: '/logviewer', perm: 'log.view' },
   { prefix: '/nodes', perm: 'streamer.view' },
