@@ -67,17 +67,20 @@ fn is_encrypted_path(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("enc")
 }
 
-fn is_encrypted_target(path: &Path) -> bool {
+fn is_encrypted_target(path: &Path) -> std::io::Result<bool> {
     if is_encrypted_path(path) {
-        return true;
+        return Ok(true);
     }
     let mut head = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| {
+    match std::fs::File::open(path) {
+        Ok(file) => {
             file.take(CIPHERTEXT_PREFIX.len() as u64)
-                .read_to_end(&mut head)
-        })
-        .is_ok_and(|_| biliup_accounts::is_ciphertext(&head))
+                .read_to_end(&mut head)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    Ok(biliup_accounts::is_ciphertext(&head))
 }
 
 fn configured_cipher() -> Result<Cipher> {
@@ -195,16 +198,15 @@ pub async fn lock_credential_file(path: impl AsRef<Path>) -> std::io::Result<Own
 }
 
 fn write_login_info_unlocked(path: &Path, login_info: &LoginInfo) -> Result<()> {
-    let mut bytes = serde_json::to_vec_pretty(login_info)?;
-    bytes.push(b'\n');
-    let bytes = if is_encrypted_target(path) {
-        configured_cipher()?
-            .seal(&bytes)
-            .map_err(|error| Kind::Custom(error.to_string()))?
-    } else {
-        bytes
-    };
-    write_bytes_unlocked(path, &bytes)
+    let mut plaintext = Zeroizing::new(serde_json::to_vec_pretty(login_info)?);
+    plaintext.push(b'\n');
+    if is_encrypted_target(path)? {
+        let sealed = configured_cipher()?
+            .seal(&plaintext)
+            .map_err(|error| Kind::Custom(error.to_string()))?;
+        return write_bytes_unlocked(path, &sealed);
+    }
+    write_bytes_unlocked(path, &plaintext)
 }
 
 fn write_bytes_unlocked(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -243,7 +245,9 @@ fn write_bytes_unlocked(path: &Path, bytes: &[u8]) -> Result<()> {
         temporary_file.sync_all()?;
         replace_credential_file(&temporary_path, path)?;
         #[cfg(unix)]
-        std::fs::File::open(parent)?.sync_all()?;
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::File::open(parent).and_then(|directory| directory.sync_all());
+        }
         Ok(())
     })();
     if write_result.is_err() {
@@ -731,11 +735,67 @@ mod encrypted_credential_tests {
         );
         assert_private(&renamed);
 
-        let names: Vec<String> = std::fs::read_dir(dir.path())
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names.len(), 2, "{names:?}");
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["accounts.key".to_string(), "x.json".to_string()]
+        );
+        clear_key();
+    }
+
+    #[test]
+    fn target_detection_reports_read_errors_instead_of_assuming_plaintext() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.json");
+        assert!(!super::is_encrypted_target(&missing).unwrap());
+
+        let error = super::is_encrypted_target(dir.path()).unwrap_err();
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_parent_fsync_does_not_fail_a_completed_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cookies.json");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = save_login_info(&path, &login_info("fsync-probe")).await;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            result.is_ok(),
+            "{:?}",
+            result.err().map(|error| error.to_string())
+        );
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_targets_are_never_rewritten_as_plaintext() {
+        use std::os::unix::fs::symlink;
+
+        let _guard = KEY_ENV.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = TempDir::new().unwrap();
+        set_key(&write_key(dir.path(), 0x77));
+        let target = dir.path().join("cookies.json");
+        symlink("cookies.json", &target).unwrap();
+
+        let error = save_login_info(&target, &login_info("guarded-secret"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("guarded-secret"));
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         clear_key();
     }
 
