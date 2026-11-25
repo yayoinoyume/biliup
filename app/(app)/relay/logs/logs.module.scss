@@ -1,0 +1,79 @@
+/* 实时日志页：视图区自己滚，行内保留原始空白。
+   颜色走 --semi-color-*，深浅主题一致。 */
+
+.switchLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--semi-color-text-2);
+  padding-bottom: 8px;
+}
+
+.metaRight {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.view {
+  height: 60vh;
+  min-height: 280px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--semi-color-fill-0);
+  font-family: var(--semi-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  color: var(--semi-color-danger);
+}
+
+.warn {
+  color: var(--semi-color-warning);
+}
+
+.info {
+  color: var(--semi-color-text-0);
+}
+
+.debug {
+  color: var(--semi-color-text-2);
+}
+
+@media (max-width: 640px) {
+  .view {
+    height: 55vh;
+  }
+}
