@@ -106,6 +106,33 @@ fn saving_same_mid_twice_replaces_without_leftovers() {
 }
 
 #[test]
+fn future_ciphertext_prefix_is_recognized() {
+    assert!(biliup_accounts::is_ciphertext(b"BUPACC2header"));
+    assert!(biliup_accounts::is_ciphertext(b"BUPACC1"));
+    assert!(!biliup_accounts::is_ciphertext(b"BUPAC"));
+    assert!(!biliup_accounts::is_ciphertext(b"{"));
+}
+
+#[test]
+fn open_returns_zeroizing_plaintext() {
+    fn assert_zeroizing(_: &biliup_accounts::Zeroizing<Vec<u8>>) {}
+    let dir = TempDir::new().unwrap();
+    let store = AccountStore::open(dir.path(), None).unwrap();
+    let value = json!({"token_info": {"mid": 12, "access_token": "secret"}});
+    store.save(12, &value).unwrap();
+
+    let cipher =
+        biliup_accounts::Cipher::from_key_file(&dir.path().join("accounts.key")).unwrap();
+    let sealed = fs::read(store.path_for(12)).unwrap();
+    let plain = cipher.open(&sealed).unwrap();
+    assert_zeroizing(&plain);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&plain).unwrap(),
+        value
+    );
+}
+
+#[test]
 fn key_env_is_unset_for_these_cases() {
     assert!(std::env::var_os(biliup_accounts::KEY_FILE_ENV).is_none());
 }

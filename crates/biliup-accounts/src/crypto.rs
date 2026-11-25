@@ -3,13 +3,14 @@ use ring::aead;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const KEY_FILE_ENV: &str = "BILIUP_ACCOUNT_KEY_FILE";
 
 const KEY_TEXT_LEN: usize = 64;
 const KEY_FILE_MAX_BYTES: u64 = 4096;
 
+pub const CIPHERTEXT_PREFIX: &[u8] = b"BUPACC";
 pub(crate) const MAGIC: &[u8; 7] = b"BUPACC1";
 pub(crate) const NONCE_LEN: usize = 12;
 pub(crate) const TAG_LEN: usize = 16;
@@ -37,7 +38,7 @@ impl Cipher {
         seal(&self.key, plaintext)
     }
 
-    pub fn open(&self, ciphertext: &[u8]) -> io::Result<Vec<u8>> {
+    pub fn open(&self, ciphertext: &[u8]) -> io::Result<Zeroizing<Vec<u8>>> {
         open(&self.key, ciphertext)
     }
 
@@ -56,7 +57,7 @@ impl Cipher {
 }
 
 pub fn is_ciphertext(bytes: &[u8]) -> bool {
-    bytes.starts_with(MAGIC)
+    bytes.starts_with(CIPHERTEXT_PREFIX)
 }
 
 pub(crate) struct Key([u8; 32]);
@@ -156,7 +157,7 @@ pub(crate) fn seal(key: &Key, plaintext: &[u8]) -> io::Result<Vec<u8>> {
     Ok(sealed)
 }
 
-pub(crate) fn open(key: &Key, sealed: &[u8]) -> io::Result<Vec<u8>> {
+pub(crate) fn open(key: &Key, sealed: &[u8]) -> io::Result<Zeroizing<Vec<u8>>> {
     if sealed.len() < HEADER_LEN + TAG_LEN || &sealed[..MAGIC.len()] != MAGIC {
         return Err(AccountError::Damaged.into_io());
     }
@@ -164,15 +165,16 @@ pub(crate) fn open(key: &Key, sealed: &[u8]) -> io::Result<Vec<u8>> {
         .try_into()
         .map_err(|_| AccountError::Damaged.into_io())?;
     let mut payload = sealed[HEADER_LEN..].to_vec();
-    let plain = key
-        .cipher()?
-        .open_in_place(
-            aead::Nonce::assume_unique_for_key(nonce),
-            aead::Aad::from(AAD),
-            &mut payload,
-        )
-        .map_err(|_| AccountError::Damaged.into_io())?
-        .to_vec();
+    let plain = Zeroizing::new(
+        key.cipher()?
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(AAD),
+                &mut payload,
+            )
+            .map_err(|_| AccountError::Damaged.into_io())?
+            .to_vec(),
+    );
     payload.zeroize();
     Ok(plain)
 }

@@ -56,7 +56,7 @@ impl AccountStore {
 
     pub fn load(&self, mid: u64) -> io::Result<Value> {
         let sealed = read_limited(&self.path_for(mid))?;
-        let plaintext = Zeroizing::new(self.key.open(&sealed)?);
+        let plaintext = self.key.open(&sealed)?;
         serde_json::from_slice(&plaintext).map_err(|error| AccountError::Serialize(error).into_io())
     }
 

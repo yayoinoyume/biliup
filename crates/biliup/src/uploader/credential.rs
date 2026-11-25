@@ -2,7 +2,7 @@ use crate::client::StatefulClient;
 use futures::Future;
 use reqwest::header;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -10,7 +10,7 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use crate::error::{Kind, Result};
 use crate::uploader::bilibili::{BiliBili, ResponseData};
 use base64::{Engine as _, engine::general_purpose};
-use biliup_accounts::Cipher;
+use biliup_accounts::{CIPHERTEXT_PREFIX, Cipher, Zeroizing};
 use cookie::Cookie;
 use md5::{Digest, Md5};
 use reqwest::header::{COOKIE, ORIGIN, REFERER, USER_AGENT};
@@ -67,6 +67,19 @@ fn is_encrypted_path(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("enc")
 }
 
+fn is_encrypted_target(path: &Path) -> bool {
+    if is_encrypted_path(path) {
+        return true;
+    }
+    let mut head = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| {
+            file.take(CIPHERTEXT_PREFIX.len() as u64)
+                .read_to_end(&mut head)
+        })
+        .is_ok_and(|_| biliup_accounts::is_ciphertext(&head))
+}
+
 fn configured_cipher() -> Result<Cipher> {
     Cipher::from_env()?.ok_or_else(|| {
         Kind::Custom("凭据密钥未配置：请设置 BILIUP_ACCOUNT_KEY_FILE 指向密钥文件".into())
@@ -74,7 +87,7 @@ fn configured_cipher() -> Result<Cipher> {
 }
 
 fn read_login_info(path: &Path) -> Result<LoginInfo> {
-    let bytes = std::fs::read(path)?;
+    let bytes = Zeroizing::new(std::fs::read(path)?);
     let plaintext = if biliup_accounts::is_ciphertext(&bytes) {
         configured_cipher()?
             .open(&bytes)
@@ -184,7 +197,7 @@ pub async fn lock_credential_file(path: impl AsRef<Path>) -> std::io::Result<Own
 fn write_login_info_unlocked(path: &Path, login_info: &LoginInfo) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(login_info)?;
     bytes.push(b'\n');
-    let bytes = if is_encrypted_path(path) {
+    let bytes = if is_encrypted_target(path) {
         configured_cipher()?
             .seal(&bytes)
             .map_err(|error| Kind::Custom(error.to_string()))?
@@ -229,6 +242,8 @@ fn write_bytes_unlocked(path: &Path, bytes: &[u8]) -> Result<()> {
         temporary_file.write_all(bytes)?;
         temporary_file.sync_all()?;
         replace_credential_file(&temporary_path, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if write_result.is_err() {
@@ -672,6 +687,55 @@ mod encrypted_credential_tests {
         let error = read_login_info(&path).unwrap_err().to_string();
         assert!(error.contains(DAMAGED), "{error}");
         assert!(!error.contains("guarded-secret"));
+        clear_key();
+    }
+
+    #[tokio::test]
+    async fn unknown_ciphertext_version_reports_damage() {
+        let _guard = KEY_ENV.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = TempDir::new().unwrap();
+        set_key(&write_key(dir.path(), 0x66));
+        let path = dir.path().join("future.json");
+        let mut future = b"BUPACC2".to_vec();
+        future.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&path, &future).unwrap();
+        assert!(biliup_accounts::is_ciphertext(&future));
+
+        let error = read_login_info(&path).unwrap_err().to_string();
+        assert!(error.contains(DAMAGED), "{error}");
+        clear_key();
+    }
+
+    #[tokio::test]
+    async fn renamed_ciphertext_file_stays_encrypted_on_write_back() {
+        let _guard = KEY_ENV.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = TempDir::new().unwrap();
+        set_key(&write_key(dir.path(), 0x55));
+        let encrypted = dir.path().join("cookies.json.enc");
+        save_login_info(&encrypted, &login_info("renamed-secret"))
+            .await
+            .unwrap();
+
+        let renamed = dir.path().join("x.json");
+        std::fs::rename(&encrypted, &renamed).unwrap();
+        save_login_info(&renamed, &login_info("renamed-secret"))
+            .await
+            .unwrap();
+
+        let raw = std::fs::read(&renamed).unwrap();
+        assert_eq!(&raw[..7], b"BUPACC1");
+        assert!(!String::from_utf8_lossy(&raw).contains("renamed-secret"));
+        assert_eq!(
+            read_login_info(&renamed).unwrap().token_info.access_token,
+            "renamed-secret"
+        );
+        assert_private(&renamed);
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
         clear_key();
     }
 
