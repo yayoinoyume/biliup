@@ -37,6 +37,9 @@ const STATUS_ERROR_CODES: Record<number, string> = {
   504: 'timeout',
 }
 
+/** 空 body 时 api-streamer 抛的泛化英文，不该盖过本地中文兜底。 */
+const GENERIC_HTTP_MESSAGE = /^(HTTP \d{3}|Unauthorized)$/
+
 /**
  * 转播接口的统一错误：`status` 是真实 HTTP 状态（信封拒绝时为 200），
  * `code` 是后端给的业务码，没有就按状态码推一个稳定值，`message` 一定是可直接展示的中文。
@@ -94,7 +97,8 @@ async function relayRequest(
   try {
     await handleResponse(response)
   } catch (error) {
-    if (error instanceof Error && error.message !== 'Unauthorized') shared = error.message
+    // 409/500 的空 body 会得到 'HTTP 409' 这类泛化文案，交给 describeHttpStatus 出中文
+    if (error instanceof Error && !GENERIC_HTTP_MESSAGE.test(error.message)) shared = error.message
   }
   const body = readErrorBody(raw)
   throw new RelayApiError(
@@ -236,8 +240,21 @@ export interface RelayYtStatus {
   ffmpeg_cache_latency_secs: number
 }
 
-export interface RelayTwStatus extends RelayYtStatus {
+/** 与 webui::state::TwStatus 一致：没有 YouTube 的 topic，换成 game。 */
+export interface RelayTwStatus {
+  is_live: boolean
+  enable_monitor: boolean
+  warning_held?: boolean
+  title: string | null
   game: string | null
+  channel_name: string
+  channel_id: string
+  quality: string
+  area_id: number
+  area_name: string
+  crop_enabled: boolean
+  ffmpeg_cache_enabled: boolean
+  ffmpeg_cache_latency_secs: number
 }
 
 export interface RelayNicoStatus {
@@ -1047,14 +1064,14 @@ export type RelayConditionalResult<T> =
 
 const RELAY = '/v1/relay'
 
-/** 设置里的 Niconico 登录态路由（后端字面量）。 */
-const RELAY_NICONICO_SESSION = `${RELAY}/niconico-session`
-/** 设置里的 YouTube Cookie 路由（后端字面量）。 */
-const RELAY_YOUTUBE_COOKIES = `${RELAY}/youtube-cookies`
+/** 设置里的 Niconico 登录态路由：与 relay.rs:131 的字面量逐字节一致（斜杠分段）。 */
+const RELAY_NICONICO_SESSION = `${RELAY}/niconico/session`
+/** 设置里的 YouTube Cookie 路由：与 relay.rs:167 的字面量逐字节一致（斜杠分段）。 */
+const RELAY_YOUTUBE_COOKIES = `${RELAY}/youtube/cookies`
 
 /* ---------------------------------------------------------- 裸对象端点 */
 
-/** GET /v1/relay/health —— 底座自检，不需要任何权限。 */
+/** GET /v1/relay/health —— 底座自检；仍需 relay.view（permissions.rs:456-486 的 RelayView 组）。 */
 export function relayHealth(): Promise<RelayHealthSnapshot> {
   return relayGetJson<RelayHealthSnapshot>(`${RELAY}/health`)
 }
@@ -1361,7 +1378,8 @@ export async function relayHolodexStreams(
   const search = new URLSearchParams()
   if (query.favorites) search.set('favorites', 'true')
   if (query.force) search.set('force', 'true')
-  const suffix = search.size > 0 ? `?${search.toString()}` : ''
+  const queryString = search.toString()
+  const suffix = queryString ? `?${queryString}` : ''
   const response = await relayGetJson<
     RelayEnvelope<RelayAdminStreamListItem[]> & { source?: string }
   >(`${RELAY}/holodex/streams${suffix}`)
@@ -1411,7 +1429,7 @@ export async function relayRefreshPriorityChannel(): Promise<string | null> {
   return unwrapMessage(envelope)
 }
 
-/** GET /v1/relay/niconico-session —— Niconico 登录态只读快照。 */
+/** GET /v1/relay/niconico/session —— Niconico 登录态只读快照。 */
 export async function relayNiconicoSessionStatus(): Promise<RelayNiconicoSessionStatus> {
   const envelope = await relayGetJson<RelayEnvelope<RelayNiconicoSessionStatus>>(
     RELAY_NICONICO_SESSION,
@@ -1419,7 +1437,7 @@ export async function relayNiconicoSessionStatus(): Promise<RelayNiconicoSession
   return unwrapData(envelope)
 }
 
-/** POST /v1/relay/niconico-session/check —— 真去请求一次 Niconico 校验会话。 */
+/** POST /v1/relay/niconico/session/check —— 真去请求一次 Niconico 校验会话。 */
 export async function relayCheckNiconicoSession(): Promise<RelayNiconicoSessionStatus> {
   const envelope = await relaySendJson<RelayEnvelope<RelayNiconicoSessionStatus>>(
     `${RELAY_NICONICO_SESSION}/check`,
@@ -1450,7 +1468,8 @@ export async function relayCaptureCropFrame(
 ): Promise<string> {
   const search = new URLSearchParams()
   if (channelId?.trim()) search.set('channel_id', channelId.trim())
-  const suffix = search.size > 0 ? `?${search.toString()}` : ''
+  const queryString = search.toString()
+  const suffix = queryString ? `?${queryString}` : ''
   const envelope = await relaySendJson<RelayEnvelope<null>>(
     `${RELAY}/crop/capture/${platform}${suffix}`,
     {},
@@ -1496,7 +1515,7 @@ export async function relayUpdateFfmpegCache(
 
 /* -------------------------------------------------------------- 存储 */
 
-/** GET /v1/relay/youtube-cookies —— YouTube Cookie 是否已配置（不含内容）。 */
+/** GET /v1/relay/youtube/cookies —— YouTube Cookie 是否已配置（不含内容）。 */
 export async function relayYoutubeCookieStatus(): Promise<RelayYoutubeCookieStatus> {
   const envelope = await relayGetJson<RelayEnvelope<RelayYoutubeCookieStatus>>(
     RELAY_YOUTUBE_COOKIES,
@@ -1504,7 +1523,7 @@ export async function relayYoutubeCookieStatus(): Promise<RelayYoutubeCookieStat
   return unwrapData(envelope)
 }
 
-/** POST /v1/relay/youtube-cookies —— 导入 Netscape 格式 Cookie 文本。 */
+/** POST /v1/relay/youtube/cookies —— 导入 Netscape 格式 Cookie 文本。 */
 export async function relayImportYoutubeCookies(
   content: string,
   expectedRevision: number,
@@ -1517,7 +1536,7 @@ export async function relayImportYoutubeCookies(
   return unwrapData(envelope)
 }
 
-/** DELETE /v1/relay/youtube-cookies —— 清除已保存的 Cookie。 */
+/** DELETE /v1/relay/youtube/cookies —— 清除已保存的 Cookie。 */
 export async function relayClearYoutubeCookies(
   expectedRevision: number,
 ): Promise<RelayYoutubeCookieStatus> {

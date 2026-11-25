@@ -121,6 +121,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
         href: '/relay',
         perm: 'relay.view',
         label: '转播总览',
+        activeOn: ['/relay/setup'],
         icon: (
           <Ic
             d="M12 10a2 2 0 100 4 2 2 0 000-4z"
