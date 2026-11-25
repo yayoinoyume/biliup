@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Checkbox, Input, Spin, Switch, Typography } from '@douyinfe/semi-ui'
+import { Button, Checkbox, Input, Spin, Switch, Toast, Typography } from '@douyinfe/semi-ui'
 import { IconTerminal } from '@douyinfe/semi-icons'
 import PageHeader from '../../components/PageHeader'
 import PermissionGate from '@/app/ui/relay/PermissionGate'
@@ -31,6 +31,11 @@ const LEVELS = ['ERROR', 'WARN', 'INFO', 'DEBUG'] as const
 type Level = (typeof LEVELS)[number]
 
 const LEVEL_PATTERN = /(^|\s)(TRACE|DEBUG|INFO|WARN|ERROR)\b/
+
+/** ANSI 颜色转义：控制字符用 charCode 拼进正则，避开 ESLint 的 no-control-regex。 */
+const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g')
+
+const stripAnsi = (text: string) => text.replace(ANSI_PATTERN, '')
 
 interface Line {
   key: number
@@ -106,7 +111,11 @@ export default function RelayLogsPage() {
   }, [lines, cutAnchor])
 
   const parsed = useMemo<Line[]>(
-    () => visible.map((text, index) => ({ key: index, text, level: levelOf(text) })),
+    () =>
+      visible.map((text, index) => {
+        const clean = stripAnsi(text)
+        return { key: index, text: clean, level: levelOf(clean) }
+      }),
     [visible],
   )
 
@@ -134,12 +143,24 @@ export default function RelayLogsPage() {
     )
   }
 
+  /** 清屏锚点取最后一条非空行：末尾是空串时 lastIndexOf('') 会指到别处，清屏后可能永远空白。 */
+  const cutAtLastLine = () => {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const text = lines[index]
+      if (text !== '') {
+        setCutAnchor(text)
+        return
+      }
+    }
+    setCutAnchor(null)
+  }
+
   const copyVisible = async () => {
     try {
       await navigator.clipboard.writeText(rendered.map((line) => line.text).join('\n'))
       setCopied(true)
     } catch {
-      setCopied(false)
+      Toast.error('复制失败：浏览器拒绝了剪贴板访问')
     }
   }
 
@@ -198,10 +219,14 @@ export default function RelayLogsPage() {
                 showClear
                 style={{ width: 180 }}
               />
-              <Button theme="light" onClick={() => void copyVisible()}>
+              <Button
+                theme="light"
+                disabled={rendered.length === 0}
+                onClick={() => void copyVisible()}
+              >
                 {copied ? '已复制' : '复制可见'}
               </Button>
-              <Button theme="light" onClick={() => setCutAnchor(lines[lines.length - 1] ?? null)}>
+              <Button theme="light" onClick={cutAtLastLine}>
                 清屏
               </Button>
               {cutAnchor !== null ? (

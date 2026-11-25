@@ -8,6 +8,7 @@
 import type { RelayHistorySummaryBucket } from '@/app/lib/relay'
 import { formatDurationSec, formatUnixSec } from '@/app/lib/relay-format'
 import relay from '@/app/ui/relay/relay.module.scss'
+import { bucketLiveSecs } from './useHistory'
 import styles from './analytics.module.scss'
 
 export interface StripProps {
@@ -18,11 +19,11 @@ export interface StripProps {
 
 function live(bucket: RelayHistorySummaryBucket, bucketSecs: number): number {
   if (bucketSecs <= 0) return 0
-  return Math.min(1, bucket.live_secs / bucketSecs)
+  return Math.min(1, bucketLiveSecs(bucket.live_secs) / bucketSecs)
 }
 
 export default function Strip({ buckets, bucketSecs }: StripProps) {
-  const total = buckets.reduce((sum, bucket) => sum + bucket.live_secs, 0)
+  const total = buckets.reduce((sum, bucket) => sum + bucketLiveSecs(bucket.live_secs), 0)
   const full = buckets.filter((bucket) => live(bucket, bucketSecs) >= 0.95).length
 
   if (buckets.length === 0) {
@@ -50,7 +51,7 @@ export default function Strip({ buckets, bucketSecs }: StripProps) {
                     : styles.stripOffline
               }
               title={`${formatUnixSec(bucket.start)} 起：推流 ${formatDurationSec(
-                bucket.live_secs,
+                bucketLiveSecs(bucket.live_secs),
               )}，${bucket.sessions} 场，${bucket.failures} 次失败`}
             />
           )

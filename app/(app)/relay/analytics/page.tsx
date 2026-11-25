@@ -136,32 +136,31 @@ export default function RelayAnalyticsPage() {
   const { reload: reloadEvents } = events
 
   /**
-   * 刷新：换一个新的 `to` 就会让所有查询 key 变化、自动重发；
-   * 同一秒内（key 不变）才手动重发，避免一次点击打出两轮请求。
+   * 刷新：custom 模式的 from/to 不跟 anchor 走，推进 anchor 不会改变查询 key，
+   * 必须直接重发三个请求；非 custom 模式推进 anchor 让 key 变化，同一秒内（key 不变）才手动重发。
    */
-  const reloadAll = useCallback(() => {
+  const refresh = useCallback(() => {
     const now = Math.floor(Date.now() / 1000)
-    if (now === anchor) {
-      reloadHistory()
-      reloadSessions()
-      reloadEvents()
+    if (range !== 'custom' && now !== anchor) {
+      setAnchor(now)
       return
     }
-    setAnchor(now)
-  }, [anchor, reloadHistory, reloadSessions, reloadEvents])
+    reloadHistory()
+    reloadSessions()
+    reloadEvents()
+  }, [range, anchor, reloadHistory, reloadSessions, reloadEvents])
 
   useEffect(() => {
     if (!autoRefresh) return
-    const timer = setInterval(() => {
-      setAnchor(Math.floor(Date.now() / 1000))
-    }, 60000)
+    const timer = setInterval(refresh, 60000)
     return () => clearInterval(timer)
-  }, [autoRefresh])
+  }, [autoRefresh, refresh])
 
   const changeRange = (value: string) => {
     if (value !== '7d' && value !== '30d' && value !== '90d' && value !== 'custom') return
     setRange(value)
     setAnchor(Math.floor(Date.now() / 1000))
+    setDayFilter(null)
   }
 
   const statsTooLarge = isRelayApiError(history.statsError) && history.statsError.status === 413
@@ -173,7 +172,7 @@ export default function RelayAnalyticsPage() {
       const report = await relayHistoryClean()
       Toast.success(cleanMessage(report))
       setCleanOpen(false)
-      reloadAll()
+      refresh()
     } catch (error) {
       setCleanError(error)
     }
@@ -199,7 +198,7 @@ export default function RelayAnalyticsPage() {
               </Text>
               <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} />
             </span>
-            <Button theme="light" onClick={reloadAll} loading={history.loading}>
+            <Button theme="light" onClick={refresh} loading={history.loading}>
               刷新
             </Button>
           </div>
@@ -223,10 +222,17 @@ export default function RelayAnalyticsPage() {
                   if (!Array.isArray(value) || value.length !== 2) return
                   const [start, end] = value
                   if (!(start instanceof Date) || !(end instanceof Date)) return
-                  setCustom({
-                    from: Math.floor(start.getTime() / 1000),
-                    to: Math.floor(end.getTime() / 1000),
-                  })
+                  // 后端区间是半开的 [from, to)：结束日要推到次日 00:00，否则漏掉最后一天
+                  const from = Math.floor(
+                    new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime() / 1000,
+                  )
+                  const to = Math.floor(
+                    new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1).getTime() / 1000,
+                  )
+                  // 单日选择的 from 会等于 to，这种请求后端按 400 拒掉，直接不发
+                  if (from >= to) return
+                  setCustom({ from, to })
+                  setDayFilter(null)
                 }}
               />
             ) : null}
@@ -236,13 +242,17 @@ export default function RelayAnalyticsPage() {
               onChange={(value) => {
                 const next = String(value)
                 setPlatform(next === 'YT' || next === 'TW' || next === 'NC' ? next : 'all')
+                setDayFilter(null)
               }}
               style={{ width: 140 }}
             />
             <Input
               value={channel}
-              onChange={setChannel}
-              placeholder="频道名或 id"
+              onChange={(value) => {
+                setChannel(value)
+                setDayFilter(null)
+              }}
+              placeholder="频道 ID"
               style={{ width: 200 }}
               showClear
             />
@@ -268,10 +278,11 @@ export default function RelayAnalyticsPage() {
               </span>
             ) : null}
           </div>
+          <p className={styles.filterNote}>平台与频道筛选作用于下方场次与事件列表。</p>
         </section>
 
         {history.summaryError && !busy ? (
-          <RelayError error={history.summaryError} onRetry={reloadAll} title="汇总加载失败" />
+          <RelayError error={history.summaryError} onRetry={refresh} title="汇总加载失败" />
         ) : null}
         {history.statusError ? (
           <RelayError error={history.statusError} onRetry={reloadHistory} title="统计库状态加载失败" />
@@ -294,9 +305,10 @@ export default function RelayAnalyticsPage() {
                 <Button
                   size="small"
                   theme="light"
+                  disabled={maxPoints <= 60}
                   onClick={() => setMaxPoints((value) => Math.max(60, Math.floor(value / 2)))}
                 >
-                  采样点减半重试
+                  {maxPoints <= 60 ? '已达最小采样点，请缩小时间范围' : '采样点减半重试'}
                 </Button>
               </div>
             }

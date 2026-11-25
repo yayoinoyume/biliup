@@ -65,6 +65,21 @@ export interface HistoryWindow {
 /** 图表后端只认这五个指标名（`crate::events::event::METRICS`）。 */
 export const HISTORY_METRICS = ['bitrate', 'fps', 'speed', 'online', 'watched']
 
+/**
+ * 时间桶的 `live_secs` 在后端是「分平台秒数」映射（`query.rs:1482` 的
+ * `BTreeMap<String, i64>` 原样序列化成 `{"YT":n,"TW":n}`），前端契约暂时写成 `number`。
+ * 两种形状都认：数字直接用，对象就把各平台的有限数值加起来，其余一律 0。
+ */
+export function bucketLiveSecs(raw: unknown): number {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : 0
+  if (raw === null || typeof raw !== 'object') return 0
+  let total = 0
+  for (const value of Object.values(raw as Record<string, unknown>)) {
+    if (typeof value === 'number' && Number.isFinite(value)) total += value
+  }
+  return total
+}
+
 interface Entry<T> {
   key: string
   data: T | null
@@ -219,24 +234,32 @@ function usePagedHistory<P extends Page>(
 
   const loadMore = useCallback(() => {
     if (store.key !== key || !store.cursor || store.loadingMore) return
+    // 与 reload 共用同一个序号：翻页期间换了筛选（key 变）或又发起了刷新，这份旧页必须丢弃
+    const seq = (seqRef.current += 1)
     const cursor = store.cursor
     setStore((prev) => ({ ...prev, loadingMore: true }))
     void historySlot(() => loadRef.current(cursor, null)).then(
       (result) => {
+        if (seq !== seqRef.current) return
         if (result.notModified) {
-          setStore((prev) => ({ ...prev, loadingMore: false }))
+          setStore((prev) => (prev.key === key ? { ...prev, loadingMore: false } : prev))
           return
         }
-        setStore((prev) => ({
-          ...prev,
-          items: [...prev.items, ...result.data.items],
-          cursor: result.data.next_cursor,
-          loadingMore: false,
-          error: null,
-        }))
+        setStore((prev) =>
+          prev.key === key
+            ? {
+                ...prev,
+                items: [...prev.items, ...result.data.items],
+                cursor: result.data.next_cursor,
+                loadingMore: false,
+                error: null,
+              }
+            : prev,
+        )
       },
       (error: unknown) => {
-        setStore((prev) => ({ ...prev, loadingMore: false, error }))
+        if (seq !== seqRef.current) return
+        setStore((prev) => (prev.key === key ? { ...prev, loadingMore: false, error } : prev))
       },
     )
   }, [store, key])

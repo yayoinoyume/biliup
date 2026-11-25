@@ -8,6 +8,7 @@
 import type { RelayHistorySummaryBucket } from '@/app/lib/relay'
 import { formatDurationSec, formatUnixSec } from '@/app/lib/relay-format'
 import relay from '@/app/ui/relay/relay.module.scss'
+import { bucketLiveSecs } from './useHistory'
 import styles from './analytics.module.scss'
 
 export interface HoursProps {
@@ -15,8 +16,9 @@ export interface HoursProps {
 }
 
 export default function Hours({ buckets }: HoursProps) {
-  const peak = buckets.reduce((max, bucket) => Math.max(max, bucket.live_secs), 0)
-  const tallest = buckets.findIndex((bucket) => bucket.live_secs === peak)
+  const secs = buckets.map((bucket) => bucketLiveSecs(bucket.live_secs))
+  const peak = secs.reduce((max, value) => Math.max(max, value), 0)
+  const tallest = secs.findIndex((value) => value === peak)
 
   if (buckets.length === 0) {
     return <p className={relay.muted}>这段区间没有推流记录。</p>
@@ -25,22 +27,22 @@ export default function Hours({ buckets }: HoursProps) {
   return (
     <div className={styles.barsWrap}>
       <div className={styles.bars} role="img" aria-label="每个时间桶的推流时长">
-        {buckets.map((bucket) => (
+        {buckets.map((bucket, index) => (
           <span
             key={bucket.start}
             className={styles.barSlot}
-            title={`${formatUnixSec(bucket.start)}：${formatDurationSec(bucket.live_secs)}，${bucket.sessions} 场`}
+            title={`${formatUnixSec(bucket.start)}：${formatDurationSec(secs[index] ?? 0)}，${bucket.sessions} 场`}
           >
             <span
               className={styles.barFill}
-              style={{ height: peak > 0 ? `${Math.round((bucket.live_secs / peak) * 100)}%` : '0%' }}
+              style={{ height: peak > 0 ? `${Math.round(((secs[index] ?? 0) / peak) * 100)}%` : '0%' }}
             />
           </span>
         ))}
       </div>
       <div className={styles.barsAxis}>
         <span>{formatUnixSec(buckets[0]?.start)}</span>
-        {tallest >= 0 ? (
+        {tallest >= 0 && peak > 0 ? (
           <span className={relay.muted}>
             峰值 {formatDurationSec(peak)} @ {formatUnixSec(buckets[tallest]?.start)}
           </span>
