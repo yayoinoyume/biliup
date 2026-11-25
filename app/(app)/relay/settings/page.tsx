@@ -1,104 +1,204 @@
 'use client'
 
-/**
- * 转播设置（`/relay/settings`）：Phase 3 底座页。
- *
- * 先只读地展示设置页读模型的关键字段，证明 `/v1/relay/config` 与权限闸都接上了；
- * 完整的编辑表单（含 `expected` 三方校验与密钥 `keep_*` 语义）由 P3-04 接管。
- */
-
-import { Tag, Typography } from '@douyinfe/semi-ui'
+import { Button, Spin, TabPane, Tabs, Typography } from '@douyinfe/semi-ui'
 import { IconSetting } from '@douyinfe/semi-icons'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { Suspense, useState } from 'react'
 import useSWR from 'swr'
 import PageHeader from '../../components/PageHeader'
+import { relayGetConfig } from '@/app/lib/relay'
 import PermissionGate from '@/app/ui/relay/PermissionGate'
 import RelayError from '@/app/ui/relay/RelayError'
-import { relayGetConfig } from '@/app/lib/relay'
-import { formatDurationSec } from '@/app/lib/relay-format'
-import styles from '@/app/ui/relay/relay.module.scss'
+import relayStyles from '@/app/ui/relay/relay.module.scss'
+import ApiKeysPanel from './ApiKeysPanel'
+import AntiCollision from './AntiCollision'
+import BannedKeywords from './BannedKeywords'
+import BaseSettings from './BaseSettings'
+import BiliAccountPanel from './BiliAccountPanel'
+import NiconicoSession from './NiconicoSession'
+import PlatformSettings from './PlatformSettings'
+import PlayerFilter from './PlayerFilter'
+import StoragePanel from './StoragePanel'
+import WarningExempt from './WarningExempt'
+import YoutubeCookies from './YoutubeCookies'
+import styles from './settings.module.scss'
 
 const { Text, Title } = Typography
 
-export default function RelaySettingsPage() {
+const TAB_KEYS = ['base', 'platform', 'keys', 'account', 'rules', 'storage'] as const
+type TabKey = (typeof TAB_KEYS)[number]
+
+const isTabKey = (value: string | null): value is TabKey =>
+  value !== null && TAB_KEYS.some((key) => key === value)
+
+function ConfigUnavailable({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  const router = useRouter()
+  return (
+    <section className={relayStyles.card}>
+      <div className={relayStyles.sectionTitle}>
+        <Title heading={6} style={{ margin: 0 }}>
+          尚未完成初始化
+        </Title>
+      </div>
+      <div className={relayStyles.stack}>
+        <Text>
+          配置尚不存在或读取失败。请先前往首次配置向导完成初始化，或在「存储与备份」里恢复加密备份。
+        </Text>
+        {error ? <RelayError error={error} title="配置读取失败" onRetry={onRetry} /> : null}
+        <div className={styles.actions}>
+          <Button onClick={onRetry}>重试读取配置</Button>
+          <Button theme="light" onClick={() => router.push('/relay/setup')}>
+            前往首次配置向导
+          </Button>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function SettingsContent() {
+  const params = useSearchParams()
+  const requestedTab = params.get('tab')
   const config = useSWR('relay:config', relayGetConfig, { revalidateOnFocus: false })
+  const [picked, setPicked] = useState<TabKey | null>(null)
   const data = config.data
 
+  const reload = () => {
+    void config.mutate()
+  }
+
+  const saved = () => config.mutate()
+
+  const fallbackTab: TabKey = data ? 'base' : 'storage'
+  const activeKey: TabKey = picked ?? (isTabKey(requestedTab) ? requestedTab : fallbackTab)
+
+  if (!data && !config.error) {
+    return (
+      <div className={relayStyles.gateLoading}>
+        <Spin size="large" />
+      </div>
+    )
+  }
+
   return (
-    <div className={styles.content}>
+    <Tabs
+      keepDOM
+      type="line"
+      className={styles.tabs}
+      activeKey={activeKey}
+      onChange={(key) => setPicked(isTabKey(key) ? key : null)}
+    >
+      <TabPane tab="基础设置" itemKey="base">
+        <div className={styles.pane}>
+          {data ? (
+            <BaseSettings
+              key={data.secret_revision}
+              data={data}
+              onSaved={saved}
+              onReload={reload}
+            />
+          ) : (
+            <ConfigUnavailable error={config.error} onRetry={reload} />
+          )}
+        </div>
+      </TabPane>
+      <TabPane tab="平台与代理" itemKey="platform">
+        <div className={styles.pane}>
+          {data ? (
+            <PlatformSettings
+              key={data.secret_revision}
+              data={data}
+              onSaved={saved}
+              onReload={reload}
+            />
+          ) : (
+            <ConfigUnavailable error={config.error} onRetry={reload} />
+          )}
+        </div>
+      </TabPane>
+      <TabPane tab="密钥池与 Cookie" itemKey="keys">
+        <div className={styles.pane}>
+          {data ? (
+            <ApiKeysPanel
+              key={data.secret_revision}
+              data={data}
+              onSaved={saved}
+              onReload={reload}
+            />
+          ) : (
+            <ConfigUnavailable error={config.error} onRetry={reload} />
+          )}
+          <YoutubeCookies />
+        </div>
+      </TabPane>
+      <TabPane tab="账号与会话" itemKey="account">
+        <div className={styles.pane}>
+          {data ? (
+            <NiconicoSession
+              key={data.secret_revision}
+              data={data}
+              onSaved={saved}
+              onReload={reload}
+            />
+          ) : (
+            <ConfigUnavailable error={config.error} onRetry={reload} />
+          )}
+          <BiliAccountPanel />
+        </div>
+      </TabPane>
+      <TabPane tab="风控与过滤" itemKey="rules">
+        <div className={styles.pane}>
+          {data ? (
+            <AntiCollision
+              key={data.secret_revision}
+              data={data}
+              onSaved={saved}
+              onReload={reload}
+            />
+          ) : (
+            <ConfigUnavailable error={config.error} onRetry={reload} />
+          )}
+          {data ? (
+            <WarningExempt
+              key={data.secret_revision}
+              data={data}
+              onSaved={saved}
+              onReload={reload}
+            />
+          ) : null}
+          <BannedKeywords />
+          <PlayerFilter />
+        </div>
+      </TabPane>
+      <TabPane tab="存储与备份" itemKey="storage">
+        <div className={styles.pane}>
+          <StoragePanel onRestored={saved} />
+        </div>
+      </TabPane>
+    </Tabs>
+  )
+}
+
+export default function RelaySettingsPage() {
+  return (
+    <div className={relayStyles.content}>
       <PageHeader
         title="转播设置"
-        description="监听间隔、平台监听目标、代理与密钥"
+        description="基础行为、平台目标与代理、密钥池、账号会话、风控规则与加密备份"
         icon={<IconSetting />}
         breadcrumbs={[{ href: '/relay', label: '直播转播' }]}
       />
 
       <PermissionGate perm="relay.config">
-        {config.error ? (
-          <RelayError
-            error={config.error}
-            onRetry={() => {
-              void config.mutate()
-            }}
-          />
-        ) : null}
-
-        <section className={styles.card}>
-          <div className={styles.sectionTitle}>
-            <Title heading={6} style={{ margin: 0 }}>
-              基础
-            </Title>
-            {data ? (
-              <Tag size="small" type="light">
-                配置版本 {data.secret_revision}
-              </Tag>
-            ) : null}
-          </div>
-          <div className={styles.statGrid}>
-            <div className={styles.stat}>
-              <span className={styles.statLabel}>监听间隔</span>
-              <span className={styles.statValue}>{formatDurationSec(data?.interval)}</span>
+        <Suspense
+          fallback={
+            <div className={relayStyles.gateLoading}>
+              <Spin size="large" />
             </div>
-            <div className={styles.stat}>
-              <span className={styles.statLabel}>直播间</span>
-              <span className={styles.statValue}>{data?.bilibili.room ?? '—'}</span>
-            </div>
-            <div className={styles.stat}>
-              <span className={styles.statLabel}>YouTube 监听</span>
-              <span className={styles.statValue}>
-                {data ? (data.youtube.enable_monitor ? '开' : '关') : '—'}
-              </span>
-            </div>
-            <div className={styles.stat}>
-              <span className={styles.statLabel}>Twitch 监听</span>
-              <span className={styles.statValue}>
-                {data ? (data.twitch.enable_monitor ? '开' : '关') : '—'}
-              </span>
-            </div>
-          </div>
-        </section>
-
-        <section className={styles.card}>
-          <div className={styles.sectionTitle}>
-            <Title heading={6} style={{ margin: 0 }}>
-              已配置的凭据
-            </Title>
-          </div>
-          <dl className={styles.kv}>
-            <dt className={styles.kvKey}>YouTube API Key</dt>
-            <dd className={styles.kvValue}>{data?.youtube_api_key_configured ? '已配置' : '未配置'}</dd>
-            <dt className={styles.kvKey}>Holodex API Key</dt>
-            <dd className={styles.kvValue}>{data?.holodex_api_key_configured ? '已配置' : '未配置'}</dd>
-            <dt className={styles.kvKey}>Riot API Key</dt>
-            <dd className={styles.kvValue}>{data?.riot_api_key_configured ? '已配置' : '未配置'}</dd>
-            <dt className={styles.kvKey}>Niconico 会话</dt>
-            <dd className={styles.kvValue}>
-              {data?.niconico.user_session_configured ? '已配置' : '未配置'}
-            </dd>
-          </dl>
-          <Text type="tertiary" size="small">
-            读模型只回掩码与「是否已配置」，密钥本体不会下发到浏览器。
-          </Text>
-        </section>
+          }
+        >
+          <SettingsContent />
+        </Suspense>
       </PermissionGate>
     </div>
   )

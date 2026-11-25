@@ -1,0 +1,134 @@
+/* 转播设置页的局部样式：只补充 relay.module.scss 里没有的表单与行列布局。 */
+
+.tabs {
+  min-width: 0;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 4px;
+  min-width: 0;
+}
+
+.formGrid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  min-width: 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--semi-color-text-0);
+}
+
+.fieldHint {
+  color: var(--semi-color-text-2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.checkRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  align-items: center;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.listRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--semi-color-fill-0);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.listMain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.keyList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.keyRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(70px, 0.6fr));
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--semi-color-fill-0);
+  min-width: 0;
+}
+
+.qrBox {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+}
+
+.qrImage {
+  border-radius: 8px;
+  /* 二维码固定纯白底：深色主题下反色会降低手机扫码识别率，因此不跟随主题变量。 */
+  background: #fff;
+  padding: 8px;
+}
+
+.conflictBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fileInput {
+  max-width: 100%;
+}
+
+@media (max-width: 640px) {
+  .formGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .keyRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
