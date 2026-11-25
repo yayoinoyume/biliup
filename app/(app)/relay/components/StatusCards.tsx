@@ -1,7 +1,7 @@
 'use client'
 
 import { Banner, Button, Input, Switch, Tag, Toast, Typography } from '@douyinfe/semi-ui'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   relayRefreshNiconico,
@@ -95,9 +95,17 @@ function BiliCard({
   const [titleDraft, setTitleDraft] = useState('')
   const [editingArea, setEditingArea] = useState(false)
   const [areaDraft, setAreaDraft] = useState<number | null>(null)
+  const refreshedLockRef = useRef<number | null>(null)
   const now = useNow(Boolean(bili.room_locked && bili.lock_till))
-  const lockRemaining =
-    bili.lock_till && now ? Math.max(0, bili.lock_till - Math.floor(now / 1000)) : null
+  const lockTill = bili.lock_till ?? null
+  const lockRemaining = lockTill && now ? Math.max(0, lockTill - Math.floor(now / 1000)) : null
+
+  useEffect(() => {
+    if (lockRemaining !== 0 || lockTill === null) return
+    if (refreshedLockRef.current === lockTill) return
+    refreshedLockRef.current = lockTill
+    onRefresh()
+  }, [lockRemaining, lockTill, onRefresh])
 
   const startStream = async () => {
     if (starting) return

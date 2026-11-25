@@ -97,6 +97,7 @@ export default function PriorityCard({
       void config.mutate()
     } catch (saveError) {
       Toast.error(saveError instanceof Error ? saveError.message : '优先频道保存失败')
+      void config.mutate()
       throw saveError
     } finally {
       setSaving(false)

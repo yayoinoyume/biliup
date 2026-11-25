@@ -48,8 +48,8 @@ export default function NetworkPanel() {
           <Tag size="small" color={data?.hls_cache_active ? 'green' : 'grey'}>
             {data?.hls_cache_active ? 'HLS 缓存运行' : 'HLS 缓存空闲'}
           </Tag>
-          <Tag size="small" color={deps.data?.ready ? 'green' : 'orange'}>
-            {deps.data?.ready ? '依赖就绪' : '依赖待补'}
+          <Tag size="small" color={deps.data ? (deps.data.ready ? 'green' : 'orange') : 'grey'}>
+            {deps.data ? (deps.data.ready ? '依赖就绪' : '依赖待补') : '依赖检查中'}
           </Tag>
         </div>
       </div>

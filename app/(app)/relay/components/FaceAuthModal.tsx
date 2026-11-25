@@ -3,6 +3,7 @@
 import { Banner, Button, Toast, Typography } from '@douyinfe/semi-ui'
 import { QRCodeSVG } from 'qrcode.react'
 import FormDialog from '@/app/ui/shell/FormDialog'
+import styles from '@/app/ui/relay/relay.module.scss'
 import pageStyles from './relay-overview.module.scss'
 
 const { Text } = Typography
@@ -57,7 +58,7 @@ export default function FaceAuthModal({
               <QRCodeSVG value={qrUrl} size={220} level="M" marginSize={2} />
             </div>
             <div className={pageStyles.linkRow}>
-              <Text className={pageStyles.monoHint} ellipsis={{ showTooltip: true }}>
+              <Text className={styles.monoHint} ellipsis={{ showTooltip: true }}>
                 {qrUrl}
               </Text>
               <Button size="small" theme="light" onClick={() => void copyLink()}>

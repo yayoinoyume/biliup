@@ -213,7 +213,7 @@ export default function StreamList({ canControl, onRefresh }: StreamListProps) {
                 </Link>
               ) : null}
             </div>
-            {canControl && !item.is_placeholder ? (
+            {canControl && item.status !== 'past' && !item.is_placeholder ? (
               <Button size="small" theme="light" disabled={busy} onClick={() => handleSwitch(item)}>
                 切台
               </Button>

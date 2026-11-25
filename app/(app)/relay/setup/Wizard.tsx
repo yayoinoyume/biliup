@@ -119,6 +119,8 @@ export default function Wizard() {
   const [saving, setSaving] = useState(false)
   const [savedMessage, setSavedMessage] = useState<string | null>(null)
   const pollTimer = useRef<number | null>(null)
+  const aliveRef = useRef(true)
+  const pollSeqRef = useRef(0)
   const setup = useSWR(RELAY_SETUP_KEY, relaySetupStatus, { revalidateOnFocus: false })
   const login = useSWR(RELAY_SETUP_LOGIN_KEY, relaySetupLoginStatus, { revalidateOnFocus: false })
   const areaGroups = useSWR(RELAY_AREA_GROUPS_KEY, loadRelayAreaGroups, {
@@ -126,7 +128,10 @@ export default function Wizard() {
   })
 
   useEffect(() => {
+    aliveRef.current = true
     return () => {
+      aliveRef.current = false
+      pollSeqRef.current += 1
       if (pollTimer.current !== null) {
         window.clearTimeout(pollTimer.current)
         pollTimer.current = null
@@ -152,17 +157,28 @@ export default function Wizard() {
     }
   }
 
-  const startPolling = (authCode: string) => {
+  const stopPolling = () => {
+    pollSeqRef.current += 1
+    if (pollTimer.current !== null) {
+      window.clearTimeout(pollTimer.current)
+      pollTimer.current = null
+    }
+    setPolling(false)
+  }
+
+  const startPolling = (authCode: string, seq: number) => {
     pollTimer.current = window.setTimeout(() => {
       pollTimer.current = null
+      if (!aliveRef.current || seq !== pollSeqRef.current) return
       void relaySetupPollLogin(authCode)
         .then((result) => {
+          if (!aliveRef.current || seq !== pollSeqRef.current) return
           setPollResult(result)
           if (result.status === 'waiting') {
-            startPolling(authCode)
+            startPolling(authCode, seq)
             return
           }
-          setPolling(false)
+          stopPolling()
           if (result.status === 'success') {
             Toast.success(result.message || 'B 站账号登录成功')
             void login.mutate()
@@ -170,7 +186,8 @@ export default function Wizard() {
           }
         })
         .catch((error) => {
-          setPolling(false)
+          if (!aliveRef.current || seq !== pollSeqRef.current) return
+          stopPolling()
           Toast.error(relayErrorMessage(error))
         })
     }, 2000)
@@ -178,17 +195,25 @@ export default function Wizard() {
 
   const requestQrCode = async () => {
     if (loadingQr || polling) return
+    const seq = pollSeqRef.current + 1
+    pollSeqRef.current = seq
+    if (pollTimer.current !== null) {
+      window.clearTimeout(pollTimer.current)
+      pollTimer.current = null
+    }
     setLoadingQr(true)
     try {
       const next = await relaySetupQrCode()
+      if (!aliveRef.current || seq !== pollSeqRef.current) return
       setQr(next)
       setPollResult(null)
       setPolling(true)
-      startPolling(next.auth_code)
+      startPolling(next.auth_code, seq)
     } catch (error) {
+      if (!aliveRef.current || seq !== pollSeqRef.current) return
       Toast.error(relayErrorMessage(error))
     } finally {
-      setLoadingQr(false)
+      if (aliveRef.current && seq === pollSeqRef.current) setLoadingQr(false)
     }
   }
 
@@ -380,7 +405,15 @@ export default function Wizard() {
             }}
           />
         ) : null}
-        {setup.data && !setup.data.needs_setup ? (
+        {setup.data?.storage_error ? (
+          <Banner
+            type="danger"
+            closeIcon={null}
+            title="数据存储不可用"
+            description={setup.data.storage_error}
+          />
+        ) : null}
+        {setup.data && !setup.data.needs_setup && !setup.data.storage_error ? (
           <Banner
             type="warning"
             closeIcon={null}
@@ -397,20 +430,30 @@ export default function Wizard() {
               <Title heading={6} style={{ margin: 0 }}>
                 第 1 步：B 站账号与直播间
               </Title>
-              <Tag size="small" color={loginCheckedIn ? 'green' : 'orange'}>
-                {loginCheckedIn ? 'B 站账号已登录' : '尚未登录'}
+              <Tag size="small" color={login.error ? 'grey' : loginCheckedIn ? 'green' : 'orange'}>
+                {login.error ? '登录状态未知' : loginCheckedIn ? 'B 站账号已登录' : '尚未登录'}
               </Tag>
             </div>
-            <Banner
-              type={loginCheckedIn ? 'success' : 'info'}
-              closeIcon={null}
-              title={loginCheckedIn ? 'B 站账号已登录' : '用 B 站客户端扫码登录'}
-              description={
-                loginCheckedIn
-                  ? '登录态已保存到加密库，下面的房间号可以从账号自动读取。'
-                  : '扫码登录后会自动保存登录态，便于后续开播与弹幕指令。也可以先手填房间号继续，稍后在设置页补登录。'
-              }
-            />
+            {login.error ? (
+              <RelayError
+                error={login.error}
+                title="B 站登录状态读取失败"
+                onRetry={() => {
+                  void login.mutate()
+                }}
+              />
+            ) : (
+              <Banner
+                type={loginCheckedIn ? 'success' : 'info'}
+                closeIcon={null}
+                title={loginCheckedIn ? 'B 站账号已登录' : '用 B 站客户端扫码登录'}
+                description={
+                  loginCheckedIn
+                    ? '登录态已保存到加密库，下面的房间号可以从账号自动读取。'
+                    : '扫码登录后会自动保存登录态，便于后续开播与弹幕指令。也可以先手填房间号继续，稍后在设置页补登录。'
+                }
+              />
+            )}
             <div className={styles.toolbar}>
               <Button
                 theme="solid"
