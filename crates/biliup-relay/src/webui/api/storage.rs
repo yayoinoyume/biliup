@@ -194,7 +194,7 @@ pub async fn restore_storage_backup(JsonBody(payload): JsonBody<RestoreRequest>)
 }
 
 /// 对等节点据此判断本机能承接哪些同步；单机不带围栏承诺。
-#[allow(dead_code)] // 待 P2-05 挂载路由后拆除
+#[allow(dead_code)] // Phase 5 迁入集群能力表（/v1/relay/cluster/capabilities）时再挂载
 pub(crate) async fn storage_sync_capabilities() -> Response {
     let mut capabilities = json!({"config_sync":2,"node_local_credentials":true});
     if let Some(fencing) =

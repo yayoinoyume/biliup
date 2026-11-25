@@ -9,6 +9,13 @@ pub mod stream_list;
 
 use std::net::{IpAddr, Ipv4Addr};
 
+/// 面板处理器共用的进程级状态：日志缓冲、状态缓存与事件总线。
+///
+/// 宿主只拿这一个入口，不需要认识 `app_state` 模块的内部结构。
+pub fn app_state() -> crate::app_state::AppState {
+    crate::app_state::AppState::current()
+}
+
 /// 监听地址解析：`localhost` 归一为回环地址，其余必须是字面 IP。
 pub fn parse_bind(input: &str) -> Result<IpAddr, String> {
     let input = input.trim();

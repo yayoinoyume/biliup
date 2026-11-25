@@ -158,8 +158,10 @@ impl Permission {
 pub fn required_permission(method: &Method, route: &str, raw_path: &str) -> Option<Permission> {
     use Permission::*;
     let get = method == Method::GET || method == Method::HEAD;
+    if route.starts_with("/v1/relay/") {
+        return relay_permission(method, route);
+    }
     let permission = match route {
-        "/v1/relay/health" if get => RelayView,
         "/v1/streamers" | "/v1/streamers/page" | "/v1/overview" if get => StreamerView,
         "/v1/streamers" if method == Method::POST || method == Method::PUT => StreamerEdit,
         "/v1/streamers/{id}" if method == Method::DELETE => StreamerEdit,
@@ -445,6 +447,104 @@ pub fn required_permission(method: &Method, route: &str, raw_path: &str) -> Opti
     Some(permission)
 }
 
+/// 转播底座的 `/v1/relay/*` 三级矩阵：Admin 全开；Operator = RelayView + RelayControl；
+/// Viewer = RelayView。同一路径的读与写分开登记：`/config`、`/player-filter`、
+/// `/banned-keywords`、`/manage/areas`、`/manage/channels` 都是读 RelayView、写 RelayConfig。
+fn relay_permission(method: &Method, route: &str) -> Option<Permission> {
+    use Permission::*;
+    let get = method == Method::GET || method == Method::HEAD;
+    let write = method == Method::POST || method == Method::PUT || method == Method::DELETE;
+    let permission = match route {
+        "/v1/relay/health"
+        | "/v1/relay/status"
+        | "/v1/relay/network-status"
+        | "/v1/relay/events"
+        | "/v1/relay/version"
+        | "/v1/relay/logs"
+        | "/v1/relay/deps/status"
+        | "/v1/relay/channels"
+        | "/v1/relay/areas"
+        | "/v1/relay/areas/catalog"
+        | "/v1/relay/banned-keywords"
+        | "/v1/relay/holodex/streams"
+        | "/v1/relay/holodex/auth/status"
+        | "/v1/relay/youtube/keys"
+        | "/v1/relay/history/status"
+        | "/v1/relay/history/summary"
+        | "/v1/relay/history/sessions"
+        | "/v1/relay/history/events"
+        | "/v1/relay/history/stats"
+        | "/v1/relay/config"
+        | "/v1/relay/player-filter"
+        | "/v1/relay/manage/areas"
+        | "/v1/relay/manage/channels"
+        | "/v1/relay/setup-status"
+        | "/v1/relay/setup/bili-room"
+        | "/v1/relay/crop/{platform}"
+        | "/v1/relay/ffmpeg-cache/{platform}"
+        | "/v1/relay/niconico/session"
+            if get =>
+        {
+            RelayView
+        }
+        "/v1/relay/start"
+        | "/v1/relay/stop"
+        | "/v1/relay/restart"
+        | "/v1/relay/danmaku"
+        | "/v1/relay/cover"
+        | "/v1/relay/area"
+        | "/v1/relay/title"
+        | "/v1/relay/channel"
+        | "/v1/relay/toggle-youtube-monitor"
+        | "/v1/relay/toggle-twitch-monitor"
+        | "/v1/relay/toggle-niconico-monitor"
+        | "/v1/relay/priority-channel/release-warning"
+        | "/v1/relay/holodex/switch"
+        | "/v1/relay/history/clean"
+        | "/v1/relay/crop/capture/{platform}"
+        | "/v1/relay/niconico/session/check"
+            if method == Method::POST =>
+        {
+            RelayControl
+        }
+        "/v1/relay/refresh/youtube"
+        | "/v1/relay/refresh/twitch"
+        | "/v1/relay/refresh/niconico"
+        | "/v1/relay/refresh/priority-channel"
+            if get =>
+        {
+            RelayControl
+        }
+        "/v1/relay/config"
+        | "/v1/relay/priority-channel"
+        | "/v1/relay/banned-keywords"
+        | "/v1/relay/storage/backup"
+        | "/v1/relay/storage/restore"
+        | "/v1/relay/player-filter"
+        | "/v1/relay/manage/areas"
+        | "/v1/relay/manage/areas/{id}"
+        | "/v1/relay/manage/channels"
+        | "/v1/relay/manage/channels/{name}"
+        | "/v1/relay/channels/resolve-youtube"
+        | "/v1/relay/setup/save-config"
+        | "/v1/relay/setup/holodex-favorites"
+        | "/v1/relay/setup/poll-login"
+        | "/v1/relay/crop/update"
+        | "/v1/relay/ffmpeg-cache/update"
+            if write =>
+        {
+            RelayConfig
+        }
+        "/v1/relay/storage" | "/v1/relay/setup/login-status" | "/v1/relay/setup/qrcode"
+            if get =>
+        {
+            RelayConfig
+        }
+        "/v1/relay/youtube/cookies" => RelayConfig,
+        _ => return None,
+    };
+    Some(permission)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +577,7 @@ mod tests {
             include_str!("../api/fleet.rs"),
             include_str!("../api/fleet_ha.rs"),
             include_str!("../api/douyu_validation.rs"),
+            include_str!("../api/relay.rs"),
         ];
         // 这些路由有意不挂权限层：登录相关对外公开，`/v1/me*` 只要求登录。
         let unguarded = [
@@ -486,6 +587,9 @@ mod tests {
             "/v1/logout",
             "/v1/me",
             "/v1/me/password",
+            // YouTube Hub 推送不带浏览器 Cookie：验签由 WebSub 的 verify_token 与
+            // X-Hub-Signature HMAC 完成，所以这条路由不进权限层。
+            "/v1/relay/websub/youtube",
         ];
         let methods = [
             Method::GET,
@@ -577,6 +681,146 @@ mod tests {
         );
     }
 
+    fn method(name: &str) -> Method {
+        Method::from_bytes(name.as_bytes()).unwrap()
+    }
+
+    /// 转播底座的每条路由都必须在三级矩阵里，且读写同路径按方法分权。
+    #[test]
+    fn relay_routes_follow_the_three_role_matrix() {
+        let view: &[(&str, &str)] = &[
+            ("GET", "/v1/relay/health"),
+            ("GET", "/v1/relay/status"),
+            ("GET", "/v1/relay/network-status"),
+            ("GET", "/v1/relay/events"),
+            ("GET", "/v1/relay/version"),
+            ("GET", "/v1/relay/logs"),
+            ("GET", "/v1/relay/deps/status"),
+            ("GET", "/v1/relay/channels"),
+            ("GET", "/v1/relay/areas"),
+            ("GET", "/v1/relay/areas/catalog"),
+            ("GET", "/v1/relay/banned-keywords"),
+            ("GET", "/v1/relay/holodex/streams"),
+            ("GET", "/v1/relay/holodex/auth/status"),
+            ("GET", "/v1/relay/youtube/keys"),
+            ("GET", "/v1/relay/history/status"),
+            ("GET", "/v1/relay/history/summary"),
+            ("GET", "/v1/relay/history/sessions"),
+            ("GET", "/v1/relay/history/events"),
+            ("GET", "/v1/relay/history/stats"),
+            ("GET", "/v1/relay/config"),
+            ("GET", "/v1/relay/player-filter"),
+            ("GET", "/v1/relay/manage/areas"),
+            ("GET", "/v1/relay/manage/channels"),
+            ("GET", "/v1/relay/setup-status"),
+            ("GET", "/v1/relay/setup/bili-room"),
+            ("GET", "/v1/relay/crop/{platform}"),
+            ("GET", "/v1/relay/ffmpeg-cache/{platform}"),
+            ("GET", "/v1/relay/niconico/session"),
+        ];
+        let control: &[(&str, &str)] = &[
+            ("POST", "/v1/relay/start"),
+            ("POST", "/v1/relay/stop"),
+            ("POST", "/v1/relay/restart"),
+            ("POST", "/v1/relay/danmaku"),
+            ("POST", "/v1/relay/cover"),
+            ("POST", "/v1/relay/area"),
+            ("POST", "/v1/relay/title"),
+            ("POST", "/v1/relay/channel"),
+            ("POST", "/v1/relay/toggle-youtube-monitor"),
+            ("POST", "/v1/relay/toggle-twitch-monitor"),
+            ("POST", "/v1/relay/toggle-niconico-monitor"),
+            ("POST", "/v1/relay/priority-channel/release-warning"),
+            ("POST", "/v1/relay/holodex/switch"),
+            ("POST", "/v1/relay/history/clean"),
+            ("POST", "/v1/relay/crop/capture/{platform}"),
+            ("POST", "/v1/relay/niconico/session/check"),
+            ("GET", "/v1/relay/refresh/youtube"),
+            ("GET", "/v1/relay/refresh/twitch"),
+            ("GET", "/v1/relay/refresh/niconico"),
+            ("GET", "/v1/relay/refresh/priority-channel"),
+        ];
+        let config: &[(&str, &str)] = &[
+            ("POST", "/v1/relay/config"),
+            ("POST", "/v1/relay/priority-channel"),
+            ("POST", "/v1/relay/banned-keywords"),
+            ("POST", "/v1/relay/player-filter"),
+            ("POST", "/v1/relay/manage/areas"),
+            ("POST", "/v1/relay/manage/channels"),
+            ("POST", "/v1/relay/channels/resolve-youtube"),
+            ("POST", "/v1/relay/setup/save-config"),
+            ("POST", "/v1/relay/setup/holodex-favorites"),
+            ("POST", "/v1/relay/setup/poll-login"),
+            ("POST", "/v1/relay/crop/update"),
+            ("POST", "/v1/relay/ffmpeg-cache/update"),
+            ("POST", "/v1/relay/storage/backup"),
+            ("POST", "/v1/relay/storage/restore"),
+            ("PUT", "/v1/relay/manage/areas"),
+            ("PUT", "/v1/relay/manage/channels"),
+            ("DELETE", "/v1/relay/manage/areas/{id}"),
+            ("DELETE", "/v1/relay/manage/channels/{name}"),
+            ("GET", "/v1/relay/storage"),
+            ("GET", "/v1/relay/setup/login-status"),
+            ("GET", "/v1/relay/setup/qrcode"),
+            ("GET", "/v1/relay/youtube/cookies"),
+            ("POST", "/v1/relay/youtube/cookies"),
+            ("DELETE", "/v1/relay/youtube/cookies"),
+        ];
+
+        for (name, route) in view {
+            let permission = required_permission(&method(name), route, route);
+            assert_eq!(permission, Some(Permission::RelayView), "{name} {route}");
+            for role in Role::ALL {
+                assert!(role.has(Permission::RelayView), "{role} {route}");
+            }
+        }
+        for (name, route) in control {
+            assert_eq!(
+                required_permission(&method(name), route, route),
+                Some(Permission::RelayControl),
+                "{name} {route}"
+            );
+            assert!(Role::Operator.has(Permission::RelayControl), "{route}");
+            assert!(Role::Admin.has(Permission::RelayControl), "{route}");
+            assert!(!Role::Viewer.has(Permission::RelayControl), "{route}");
+        }
+        for (name, route) in config {
+            assert_eq!(
+                required_permission(&method(name), route, route),
+                Some(Permission::RelayConfig),
+                "{name} {route}"
+            );
+            assert!(Role::Admin.has(Permission::RelayConfig), "{route}");
+            assert!(!Role::Operator.has(Permission::RelayConfig), "{route}");
+            assert!(!Role::Viewer.has(Permission::RelayConfig), "{route}");
+        }
+
+        for route in [
+            "/v1/relay/config",
+            "/v1/relay/player-filter",
+            "/v1/relay/banned-keywords",
+            "/v1/relay/manage/areas",
+            "/v1/relay/manage/channels",
+        ] {
+            assert_eq!(
+                required_permission(&Method::GET, route, route),
+                Some(Permission::RelayView),
+                "{route}"
+            );
+            assert_eq!(
+                required_permission(&Method::POST, route, route),
+                Some(Permission::RelayConfig),
+                "{route}"
+            );
+        }
+        for route in [
+            "/v1/relay/status",
+            "/v1/relay/history/status",
+            "/v1/relay/setup-status",
+        ] {
+            assert_eq!(required_permission(&Method::POST, route, route), None, "{route}");
+        }
+    }
     #[test]
     fn static_route_distinguishes_logs_from_recordings() {
         assert_eq!(

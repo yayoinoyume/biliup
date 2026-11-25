@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Extension;
-use futures_util::stream::Stream;
+use futures_util::stream::{Stream, StreamExt};
 use tokio::sync::{broadcast, watch};
 
 pub use crate::ui_events::{CLUSTER, CONFIG, HISTORY, HOLODEX, STATUS};
@@ -85,6 +85,29 @@ pub async fn sse_events(
         .map(|Extension(auth)| auth)
         .unwrap_or_else(|| Arc::new(SseAuth::allow_all()));
     Sse::new(sse_stream(rx, auth, Arc::new(headers))).keep_alive(KeepAlive::default())
+}
+
+/// 带外部终止入口的事件流：`shutdown` 完成即断流。
+///
+/// 鉴权层把会话撤销接到这里，改密、删号或降权后流立刻结束；
+/// 不必等下一次事件，也不留下挂在流上的任务。
+pub fn sse_stream_until(
+    state: AppState,
+    headers: HeaderMap,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // 广播发送端就在 AppState 里：流必须持有它，否则接收端立刻收到 Closed 并结束。
+    let held = state.clone();
+    let stream = sse_stream(
+        state.subscribe_events(),
+        Arc::new(SseAuth::allow_all()),
+        Arc::new(headers),
+    );
+    Sse::new(stream.take_until(shutdown).map(move |item| {
+        let _held = &held;
+        item
+    }))
+    .keep_alive(KeepAlive::default())
 }
 
 /// 事件流本体：先判权，再等事件；每次唤醒都复查一次撤权钩子。
@@ -270,6 +293,29 @@ mod tests {
         assert!(
             closed_within(&mut stream, Duration::from_secs(1)).await,
             "撤权钩子翻 false 后必须立刻断流"
+        );
+    }
+
+    /// 外部终止信号（会话撤销）发出后，流必须立刻结束，不等下一个事件。
+    #[tokio::test]
+    async fn an_external_shutdown_ends_the_stream() {
+        use axum::response::IntoResponse;
+
+        let state = AppState::new();
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+        let stream = sse_stream_until(state, HeaderMap::new(), async move {
+            let _ = gate.await;
+        });
+        let mut body = stream.into_response().into_body().into_data_stream();
+        assert!(
+            !closed_within(&mut body, Duration::from_millis(100)).await,
+            "终止信号发出前流必须保持连接"
+        );
+
+        release.send(()).unwrap();
+        assert!(
+            closed_within(&mut body, Duration::from_secs(1)).await,
+            "终止信号发出后流必须立刻结束"
         );
     }
 

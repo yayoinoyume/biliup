@@ -1236,12 +1236,11 @@ where
     R: Send + 'static,
     F: FnOnce(&mut T) -> Result<R, String> + Send + 'static,
 {
-    mutate_stored_document(
-        crate::storage::global().map_err(|e| e.to_string())?,
-        name.to_owned(),
-        edit,
-    )
-    .await
+    let store = tokio::task::spawn_blocking(crate::storage::global)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    mutate_stored_document(store, name.to_owned(), edit).await
 }
 
 async fn mutate_stored_document<T, R, F>(

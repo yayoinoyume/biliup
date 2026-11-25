@@ -587,8 +587,7 @@ pub async fn refresh_priority_channel_status() -> Json<ApiResponse<()>> {
     }
 }
 
-#[allow(dead_code)] // P2-05 挂载路由后由处理器表调用
-pub(crate) async fn niconico_session_status(
+pub async fn niconico_session_status(
 ) -> Result<Json<ApiResponse<niconico_session::SessionStatus>>, StatusCode> {
     let cfg = load_config()
         .await
@@ -600,8 +599,7 @@ pub(crate) async fn niconico_session_status(
     }))
 }
 
-#[allow(dead_code)] // P2-05 挂载路由后由处理器表调用
-pub(crate) async fn check_niconico_session(
+pub async fn check_niconico_session(
 ) -> Result<Json<ApiResponse<niconico_session::SessionStatus>>, StatusCode> {
     let cfg = load_config()
         .await

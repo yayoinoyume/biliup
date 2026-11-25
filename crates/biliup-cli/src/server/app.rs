@@ -77,14 +77,16 @@ impl ApplicationController {
 
         // 构建应用程序路由
         // 是否启用登录保护
-        let mut protected_routes =
-            server::router::router(service_register.clone()).route("/v1/ws/logs", get(ws_logs));
+        let mut protected_routes = server::router::router(service_register.clone())
+            .route("/v1/ws/logs", get(ws_logs))
+            .merge(server::api::relay::router(service_register.clone()));
         if let Some(fleet_routes) = fleet.router() {
             protected_routes = protected_routes.merge(fleet_routes);
         }
         protected_routes = fleet.guard(protected_routes);
         let mut app = with_optional_auth(protected_routes, enable_login_guard);
         app = app
+            .merge(server::api::relay::websub_router())
             .layer(Extension(fleet.capability()))
             .layer(auth_layer) // 添加认证层
             .layer(development_cors())

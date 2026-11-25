@@ -21,7 +21,7 @@ pub(crate) enum SessionState {
 }
 
 #[derive(Clone, Serialize)]
-pub(crate) struct SessionStatus {
+pub struct SessionStatus {
     state: SessionState,
     checked_at: Option<String>,
     message: String,

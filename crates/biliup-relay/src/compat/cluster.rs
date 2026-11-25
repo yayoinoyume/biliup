@@ -349,6 +349,10 @@ pub async fn push_monitored_config_to_peers(_config: &Config) -> Result<(), Stri
 }
 
 /// 待 Phase 3 集群弹幕命令运行时同步迁入后替换：单机直接改本地门闸与客户端。
+/// 待 Phase 3 集群开关同步迁入后由真实实现替换。
+///
+/// 与 `runtime.rs` 的 `sync_danmaku_client` 保持同一顺序和同一句运维可见日志：
+/// 先翻转门闸，运行中再走 stop_danmaku 留下停止信号。
 pub async fn apply_danmaku_command_runtime_state(enabled: bool) {
     crate::plugins::enable_danmaku_commands(enabled);
     if enabled {
@@ -356,6 +360,7 @@ pub async fn apply_danmaku_command_runtime_state(enabled: bool) {
             crate::plugins::run_danmaku();
         }
     } else if crate::plugins::is_danmaku_running() {
+        tracing::info!("弹幕命令已禁用，停止弹幕客户端");
         crate::plugins::stop_danmaku().await;
     }
 }
@@ -407,6 +412,31 @@ mod tests {
         assert!(
             !crate::plugins::should_stop_danmaku(),
             "没有客户端在跑时不得留下停止信号"
+        );
+    }
+
+    /// 运行中的替身（只有运行标志、没有真线程）走禁用分支：门闸翻转、停止信号留下，
+    /// 停机流程必须真的被触发，而不是被 `else if` 静默跳过。
+    #[tokio::test]
+    async fn disabling_a_running_client_goes_through_the_stop_path() {
+        let _guard = crate::storage::lock_test_global();
+        let _reset = GateReset {
+            commands_enabled: crate::plugins::is_danmaku_commands_enabled(),
+            running: crate::plugins::is_danmaku_running(),
+        };
+        crate::plugins::set_danmaku_stop_signal(false);
+        crate::plugins::set_danmaku_commands_enabled(true);
+        crate::plugins::set_danmaku_running(true);
+
+        apply_danmaku_command_runtime_state(false).await;
+
+        assert!(
+            !crate::plugins::is_danmaku_commands_enabled(),
+            "禁用必须立即翻转门闸"
+        );
+        assert!(
+            crate::plugins::should_stop_danmaku(),
+            "运行中禁用必须走 stop_danmaku 并留下停止信号"
         );
     }
 }

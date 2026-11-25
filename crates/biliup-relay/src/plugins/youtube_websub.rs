@@ -19,7 +19,7 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Query};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, MethodRouter};
 use axum::Router;
 use futures_util::stream::{self, StreamExt};
 use hmac::{Hmac, Mac};
@@ -416,11 +416,18 @@ async fn push_handler(headers: HeaderMap, body: Bytes) -> Response {
     }
 }
 
+/// The callback as one method router: the host mounts it outside its login
+/// guard, so the hub's cookie-less GET/POST is authenticated only by
+/// `verify_token` and the `X-Hub-Signature` HMAC checked here.
+pub fn callback_method_router() -> MethodRouter {
+    get(verify_handler)
+        .post(push_handler)
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
+}
+
 /// Serves only [`CALLBACK_PATH`]; every other path is 404.
 pub fn callback_router() -> Router {
-    Router::new()
-        .route(CALLBACK_PATH, get(verify_handler).post(push_handler))
-        .layer(DefaultBodyLimit::max(BODY_LIMIT))
+    Router::new().route(CALLBACK_PATH, callback_method_router())
 }
 
 /// Resolves when a push queued new entries.

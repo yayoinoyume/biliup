@@ -135,6 +135,8 @@ struct Inner {
     engine_owned_epoch: Option<u64>,
     /// 当前这一代循环的收尾标志；停机超时后置位，线程收尾完成后自行复位。
     cleanup_pending: Arc<AtomicBool>,
+    /// 面板后台 worker；停机时必须先于统计库与存储释放。
+    workers: Option<Workers>,
 }
 
 impl Inner {
@@ -150,12 +152,60 @@ impl Inner {
             epoch: 0,
             engine_owned_epoch: None,
             cleanup_pending: Arc::new(AtomicBool::new(false)),
+            workers: None,
         }
+    }
+}
+
+/// 面板后台 worker：只由 [`RelayService`] 持有。
+///
+/// 空配置下这 8 个 worker 只反复读配置并退避，不发任何外网请求；配置就绪后
+/// 各自按自己的节拍干活。停机时先释放这些句柄，再有统计库与存储退出，
+/// 避免后台任务撞上已关闭的存储。
+struct Workers {
+    status_refresh: Option<webui::api::status::StatusRefreshWorker>,
+    stream_list: Option<webui::stream_list::StreamListWorker>,
+    discovery: Option<plugins::youtube_discovery::DiscoveryWorker>,
+    youtube_index: Option<plugins::youtube_index::StoreRefreshWorker>,
+    twitch_live: Option<plugins::twitch_live::TwitchLiveWorker>,
+    niconico_session: plugins::niconico_session::SessionWorker,
+    niconico_live: Option<plugins::niconico_live::NiconicoLiveWorker>,
+    websub: Option<plugins::youtube_websub::WebSubWorker>,
+}
+
+impl Workers {
+    /// 各 worker 的 `start_*` 返回 `None` 表示同进程里已有别的服务持有它，不是失败。
+    fn start() -> Self {
+        Self {
+            status_refresh: webui::api::status::start_status_refresh_worker(),
+            stream_list: webui::stream_list::start_stream_list_worker(),
+            discovery: plugins::youtube_discovery::start_discovery_worker(),
+            youtube_index: plugins::youtube_index::start_store_refresh_worker(),
+            twitch_live: plugins::twitch_live::start_twitch_live_worker(),
+            niconico_session: plugins::niconico_session::start_session_worker(),
+            niconico_live: plugins::niconico_live::start_niconico_live_worker(),
+            websub: plugins::youtube_websub::start_websub_worker(),
+        }
+    }
+
+    /// 每个句柄的 `Drop` 负责 abort 任务并复位自己的“已启动”标志；
+    /// 逐字段显式释放，停机顺序与列出的顺序一致。
+    fn stop(self) {
+        drop(self.status_refresh);
+        drop(self.stream_list);
+        drop(self.discovery);
+        drop(self.youtube_index);
+        drop(self.twitch_live);
+        drop(self.niconico_session);
+        drop(self.niconico_live);
+        drop(self.websub);
     }
 }
 
 pub struct RelayService {
     inner: Mutex<Inner>,
+    /// 生产宿主（`biliup server`）为 true：`start` 拉起面板后台 worker，`shutdown` 统一回收。
+    background_workers: bool,
 }
 
 impl Default for RelayService {
@@ -168,7 +218,18 @@ impl RelayService {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(Inner::new()),
+            background_workers: false,
         }
+    }
+
+    /// 启用面板后台 worker：状态刷新、预告列表、源发现、索引刷新、Twitch / Niconico
+    /// 直播查询、Niconico 会话检查与 YouTube WebSub，共 8 个。
+    ///
+    /// 只有真正对外提供 Web 面板的宿主才需要它们；默认关闭，避免没有配置的
+    /// 进程凭空拉起轮询任务。
+    pub fn with_background_workers(mut self) -> Self {
+        self.background_workers = true;
+        self
     }
 
     pub async fn start(&self, cfg: RelayInitConfig) -> Result<(), RelayError> {
@@ -194,6 +255,10 @@ impl RelayService {
         inner.ready = true;
         inner.history_owned |= history_owned;
         inner.storage = Some(store);
+        if self.background_workers && inner.workers.is_none() {
+            // 存储已就绪再拉起：worker 的第一轮读配置才拿得到库。
+            inner.workers = Some(Workers::start());
+        }
         Ok(())
     }
 
@@ -340,6 +405,10 @@ impl RelayService {
     /// 弹幕与推流是进程级单例，只在本服务还持有引擎停机责任时才动它们，
     /// 避免同进程里误停不是自己发起的引擎。
     pub async fn shutdown(&self) {
+        // 后台 worker 先退出：之后的统计库与存储关停不得与运行中的任务相撞。
+        if let Some(workers) = lock(&self.inner).workers.take() {
+            workers.stop();
+        }
         let (outcome, stopped_epoch) = self.stop_monitor_loop_inner(MONITOR_STOP_TIMEOUT).await;
         let cleanup_epoch = match outcome {
             MonitorStopOutcome::TimedOut => stopped_epoch,
@@ -393,6 +462,9 @@ impl Drop for RelayService {
             .inner
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(workers) = inner.workers.take() {
+            workers.stop();
+        }
         // 统计句柄在这里同步收尾：Drop 不能 await，只能让写入线程自己退出。
         // 同样只停本实例装上的引擎，不能顺手杀掉别人的。
         if std::mem::take(&mut inner.history_owned) {
@@ -552,6 +624,32 @@ mod tests {
         assert_eq!(documents, 1, "重启后原有文档仍可读");
         drop(reopened);
         relay.shutdown().await;
+    }
+
+    /// 8 个后台 worker 随服务启停：`start -> shutdown` 两轮都干净收尾，
+    /// 空配置下不发外网请求、不 panic、不留句柄。
+    #[tokio::test]
+    async fn background_workers_start_and_stop_with_the_service() {
+        let _store = storage::lock_test_global();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RelayInitConfig {
+            data_dir: dir.path().join("relay"),
+            key_file: Some(dir.path().join("keys/master.key")),
+            ffmpeg_path: None,
+        };
+        let relay = RelayService::new().with_background_workers();
+        for round in 0..2 {
+            relay.start(cfg.clone()).await.expect("启动应成功");
+            assert!(
+                lock(&relay.inner).workers.is_some(),
+                "第 {round} 轮 start 必须拉起 8 个后台 worker"
+            );
+            relay.shutdown().await;
+            assert!(
+                lock(&relay.inner).workers.is_none(),
+                "第 {round} 轮 shutdown 必须先释放全部 worker 句柄"
+            );
+        }
     }
 
     async fn boot_relay_for_monitor() -> (tempfile::TempDir, RelayService) {

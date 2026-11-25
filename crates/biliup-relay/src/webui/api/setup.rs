@@ -262,8 +262,7 @@ fn setup_enables_monitor(
         || (!previous.bililive.enable_danmaku_command && current.bililive.enable_danmaku_command)
 }
 
-#[allow(dead_code)] // 待 P2-05 挂载路由后拆除
-pub(crate) async fn save_setup_config(
+pub async fn save_setup_config(
     Json(mut payload): Json<SetupConfigRequest>,
 ) -> Result<ApiResponse<()>, StatusCode> {
     let invalid = |message: String| ApiResponse::<()> {
@@ -467,6 +466,24 @@ pub(crate) fn qr_code_data_url(text: &str) -> Result<String, qrcode::types::QrEr
         "data:image/svg+xml;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(svg)
     ))
+}
+
+#[derive(Serialize)]
+pub struct LoginStatusResponse {
+    logged_in: bool,
+    message: String,
+}
+
+/// B 站账号的登录态只看加密库里有没有 cookies.json；面板自身的登录由宿主负责。
+pub async fn check_login_status() -> Result<Json<LoginStatusResponse>, StatusCode> {
+    let logged_in = tokio::task::spawn_blocking(|| crate::storage::contains("cookies.json"))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(LoginStatusResponse {
+        logged_in,
+        message: if logged_in { "已登录" } else { "未登录" }.to_string(),
+    }))
 }
 
 pub async fn get_qr_code() -> Result<Json<ApiResponse<QrCodeResponse>>, StatusCode> {
@@ -718,5 +735,31 @@ mod setup_tests {
         let mut cfg = previous.clone();
         apply_setup_targets(&mut cfg, &request, &[], false);
         assert!(!setup_enables_monitor(&previous, &cfg, &request));
+    }
+
+    struct StoreReset;
+
+    impl Drop for StoreReset {
+        fn drop(&mut self) {
+            crate::storage::shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn login_status_follows_the_stored_bilibili_cookies() {
+        let _guard = crate::storage::lock_test_global();
+        let _reset = StoreReset;
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::init(&dir.path().join("data"), Some(&dir.path().join("key"))).unwrap();
+
+        let status = check_login_status().await.unwrap().0;
+        assert!(!status.logged_in);
+        assert_eq!(status.message, "未登录");
+
+        crate::storage::write_document("cookies.json", &serde_json::json!({ "cookie_info": { "cookies": [] } }))
+            .unwrap();
+        let status = check_login_status().await.unwrap().0;
+        assert!(status.logged_in, "写入 cookies.json 后必须报已登录");
+        assert_eq!(status.message, "已登录");
     }
 }

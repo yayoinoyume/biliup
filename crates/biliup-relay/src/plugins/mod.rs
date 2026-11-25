@@ -12,7 +12,7 @@ pub mod http;
 pub(crate) mod mask_pairing;
 pub mod niconico;
 pub mod niconico_live;
-pub(crate) mod niconico_session;
+pub mod niconico_session;
 pub mod priority;
 pub mod riot;
 pub(crate) mod source_status;

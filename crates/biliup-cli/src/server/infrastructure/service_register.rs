@@ -118,7 +118,7 @@ impl ServiceRegister {
             upload_observations,
             douyu_keeper,
             room_cover_refresh,
-            relay: Arc::new(biliup_relay::RelayService::new()),
+            relay: Arc::new(biliup_relay::RelayService::new().with_background_workers()),
             pool,
             managers,
             config: config.clone(),

@@ -1927,6 +1927,7 @@ mod tests {
                 set_danmaku_stop_signal(false);
             }
         }
+        let _guard = crate::storage::lock_test_global();
         let _reset = Reset;
         set_danmaku_stop_signal(false);
         set_danmaku_running(true);
