@@ -65,16 +65,18 @@ export default function ApiKeysPanel({ data, onSaved, onReload }: ApiKeysPanelPr
 
   const save = async () => {
     if (!dirty) return
-    const ok = await state.run(async () => {
-      const message = await relayUpdateConfig({
-        ...patch,
-        expected: expectedConfigValues(data, changed),
-        expected_secret_revision: data.secret_revision,
-      })
-      await onSaved()
-      await pool.mutate()
-      return message
-    })
+    const ok = await state.run(
+      () =>
+        relayUpdateConfig({
+          ...patch,
+          expected: expectedConfigValues(data, changed),
+          expected_secret_revision: data.secret_revision,
+        }),
+      async () => {
+        await onSaved()
+        await pool.mutate()
+      },
+    )
     if (ok) {
       setApiKey('')
       setClear(false)

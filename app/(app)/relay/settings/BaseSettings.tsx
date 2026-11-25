@@ -122,14 +122,14 @@ export default function BaseSettings({ data, onSaved, onReload }: BaseSettingsPr
       Toast.error('LOL 监听间隔需在 1 到 3600 秒之间')
       return
     }
-    const ok = await state.run(async () => {
-      const message = await relayUpdateConfig({
-        ...patch,
-        expected: expectedConfigValues(data, changed),
-      })
-      await onSaved()
-      return message
-    })
+    const ok = await state.run(
+      () =>
+        relayUpdateConfig({
+          ...patch,
+          expected: expectedConfigValues(data, changed),
+        }),
+      onSaved,
+    )
     if (!ok) return
   }
 

@@ -109,11 +109,7 @@ function YoutubeTargetCard({ data, onSaved }: PlatformCardProps) {
   }
 
   const saveToggle = async () => {
-    await toggle.run(async () => {
-      const message = await relayToggleYoutubeMonitor(enabled)
-      await onSaved()
-      return message
-    })
+    await toggle.run(() => relayToggleYoutubeMonitor(enabled), onSaved)
   }
 
   const saveTarget = async () => {
@@ -122,11 +118,7 @@ function YoutubeTargetCard({ data, onSaved }: PlatformCardProps) {
       Toast.error('YouTube 频道 ID 不能为空')
       return
     }
-    await target.run(async () => {
-      const message = await relayUpdateChannel(patch)
-      await onSaved()
-      return message
-    })
+    await target.run(() => relayUpdateChannel(patch), onSaved)
   }
 
   return (
@@ -211,11 +203,7 @@ function TwitchTargetCard({ data, onSaved }: PlatformCardProps) {
   }
 
   const saveToggle = async () => {
-    await toggle.run(async () => {
-      const message = await relayToggleTwitchMonitor(enabled)
-      await onSaved()
-      return message
-    })
+    await toggle.run(() => relayToggleTwitchMonitor(enabled), onSaved)
   }
 
   const saveTarget = async () => {
@@ -224,11 +212,7 @@ function TwitchTargetCard({ data, onSaved }: PlatformCardProps) {
       Toast.error('Twitch 频道 ID 不能为空')
       return
     }
-    await target.run(async () => {
-      const message = await relayUpdateChannel(patch)
-      await onSaved()
-      return message
-    })
+    await target.run(() => relayUpdateChannel(patch), onSaved)
   }
 
   return (
@@ -313,11 +297,7 @@ function NiconicoTargetCard({ data, onSaved }: PlatformCardProps) {
   }
 
   const saveToggle = async () => {
-    await toggle.run(async () => {
-      const message = await relayToggleNiconicoMonitor(enabled)
-      await onSaved()
-      return message
-    })
+    await toggle.run(() => relayToggleNiconicoMonitor(enabled), onSaved)
   }
 
   const saveTarget = async () => {
@@ -326,11 +306,7 @@ function NiconicoTargetCard({ data, onSaved }: PlatformCardProps) {
       Toast.error('Niconico 频道 ID 不能为空')
       return
     }
-    await target.run(async () => {
-      const message = await relayUpdateChannel(patch)
-      await onSaved()
-      return message
-    })
+    await target.run(() => relayUpdateChannel(patch), onSaved)
   }
 
   return (

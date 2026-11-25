@@ -82,16 +82,18 @@ export default function NiconicoSession({ data, onSaved, onReload }: NiconicoSes
 
   const save = async () => {
     if (!dirty) return
-    const ok = await state.run(async () => {
-      const message = await relayUpdateConfig({
-        ...patch,
-        expected: expectedConfigValues(data, changed),
-        expected_secret_revision: data.secret_revision,
-      })
-      await onSaved()
-      void session.mutate()
-      return message
-    })
+    const ok = await state.run(
+      () =>
+        relayUpdateConfig({
+          ...patch,
+          expected: expectedConfigValues(data, changed),
+          expected_secret_revision: data.secret_revision,
+        }),
+      async () => {
+        await onSaved()
+        await session.mutate()
+      },
+    )
     if (ok) {
       setValue('')
       setClear(false)

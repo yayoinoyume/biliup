@@ -115,20 +115,36 @@ export function useSettingsSave() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<unknown>(null)
 
-  const run = useCallback(async (task: () => Promise<string | null>): Promise<boolean> => {
-    setSaving(true)
-    setError(null)
-    try {
-      const message = await enqueueRelaySave(task)
-      if (message) Toast.success({ content: message, duration: 4 })
-      return true
-    } catch (nextError) {
-      setError(nextError)
-      return false
-    } finally {
-      setSaving(false)
-    }
-  }, [])
+  const run = useCallback(
+    async (
+      task: () => Promise<string | null>,
+      after?: () => Promise<unknown> | unknown,
+    ): Promise<boolean> => {
+      setSaving(true)
+      setError(null)
+      try {
+        const message = await enqueueRelaySave(task)
+        if (message) Toast.success({ content: message, duration: 4 })
+        if (after) {
+          try {
+            await after()
+          } catch (refreshError) {
+            Toast.warning({
+              content: '保存已生效，但刷新配置失败：' + relayErrorMessage(refreshError),
+              duration: 6,
+            })
+          }
+        }
+        return true
+      } catch (nextError) {
+        setError(nextError)
+        return false
+      } finally {
+        setSaving(false)
+      }
+    },
+    [],
+  )
 
   return { saving, error, run, clearError: () => setError(null) }
 }

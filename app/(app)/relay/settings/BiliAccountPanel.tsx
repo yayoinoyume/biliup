@@ -51,7 +51,10 @@ export default function BiliAccountPanel() {
   useEffect(() => {
     if (!qr) return
     let cancelled = false
-    const timer = setInterval(async () => {
+    let timer: number | undefined
+
+    const poll = async () => {
+      if (cancelled) return
       try {
         const result = await relaySetupPollLogin(qr.auth_code)
         if (cancelled) return
@@ -63,21 +66,27 @@ export default function BiliAccountPanel() {
           void mutateLogin()
           void mutateRoom()
           void mutateSetup()
-        } else if (result.status === 'expired' || result.status === 'error') {
+          return
+        }
+        if (result.status === 'expired' || result.status === 'error') {
           setQr(null)
           setOpen(false)
           Toast.error(result.message)
+          return
         }
+        timer = window.setTimeout(() => void poll(), 2000)
       } catch (error) {
         if (cancelled) return
         setQr(null)
         setOpen(false)
         Toast.error({ content: relayErrorMessage(error), duration: 6 })
       }
-    }, 2000)
+    }
+
+    timer = window.setTimeout(() => void poll(), 2000)
     return () => {
       cancelled = true
-      clearInterval(timer)
+      if (timer !== undefined) window.clearTimeout(timer)
     }
   }, [qr, mutateLogin, mutateRoom, mutateSetup])
 
@@ -149,7 +158,7 @@ export default function BiliAccountPanel() {
         </div>
 
         <Text type="tertiary" size="small">
-          relaySetupStatus 里的需要引导判据来自 config.json 与 cookies.json 是否已写入；缺文件时请先在转播向导完成首次配置。
+          首次使用状态取决于配置与登录凭据是否已写入；缺文件时请先在转播向导完成首次配置。
         </Text>
       </SettingsCard>
 

@@ -1,7 +1,7 @@
 'use client'
 
-import { Button, Input, Toast, Typography } from '@douyinfe/semi-ui'
-import { useState, type ChangeEvent } from 'react'
+import { Banner, Button, Input, Toast, Typography } from '@douyinfe/semi-ui'
+import { useRef, useState, type ChangeEvent } from 'react'
 import useSWR from 'swr'
 import { relayStorageBackup, relayStorageRestore, relayStorageStatus } from '@/app/lib/relay'
 import { RELAY_MAX_RESTORE_BYTES, formatBytes } from '@/app/lib/relay-format'
@@ -21,6 +21,7 @@ export interface StoragePanelProps {
 
 export default function StoragePanel({ onRestored }: StoragePanelProps) {
   const storage = useSWR('relay:storage', relayStorageStatus, { revalidateOnFocus: false })
+  const inputRef = useRef<HTMLInputElement>(null)
   const [backupPhrase, setBackupPhrase] = useState('')
   const [backupBusy, setBackupBusy] = useState(false)
   const [restorePhrase, setRestorePhrase] = useState('')
@@ -30,6 +31,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
   const status = storage.data
   const ready = status?.ready === true
   const configured = status?.ready === true ? status.configured : false
+  const restoreAllowed = ready && !configured
 
   const download = async () => {
     const phrase = backupPhrase.trim()
@@ -58,6 +60,10 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
   }
 
   const pickFile = (event: ChangeEvent<HTMLInputElement>) => {
+    if (!restoreAllowed) {
+      event.target.value = ''
+      return
+    }
     const next = event.target.files?.[0] ?? null
     if (next && next.size > RELAY_MAX_RESTORE_BYTES) {
       Toast.error('备份文件不能超过 ' + formatBytes(RELAY_MAX_RESTORE_BYTES))
@@ -69,7 +75,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
   }
 
   const restore = async () => {
-    if (!file) return
+    if (!restoreAllowed || !file) return
     const phrase = restorePhrase.trim()
     if (phrase.length < MIN_PASSPHRASE) {
       Toast.error('恢复口令至少 ' + MIN_PASSPHRASE + ' 位')
@@ -86,8 +92,16 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
       setConfirmOpen(false)
       setRestorePhrase('')
       setFile(null)
-      await storage.mutate()
-      await onRestored()
+      if (inputRef.current) inputRef.current.value = ''
+      try {
+        await storage.mutate()
+        await onRestored()
+      } catch (refreshError) {
+        Toast.warning({
+          content: '备份已恢复，但刷新配置失败：' + relayErrorMessage(refreshError),
+          duration: 6,
+        })
+      }
     } catch (error) {
       Toast.error({ content: relayErrorMessage(error), duration: 6 })
     } finally {
@@ -166,14 +180,24 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
         title="恢复备份"
         description="上传不超过 32MiB 的 biliup.backup，输对口令后会整库覆盖；恢复无法撤销。"
       >
+        {ready && configured ? (
+          <Banner
+            type="warning"
+            closeIcon={null}
+            title="当前实例已存在配置，不能恢复备份"
+            description="当前实例已存在配置；为防误覆盖生产数据，后端仅允许在空数据目录（首次安装/清空数据目录后）恢复加密备份。如需导出当前配置，请使用上方「导出加密备份」。"
+          />
+        ) : null}
+
         <div className={styles.formGrid}>
           <SettingsField label="选择备份文件" hint={'上限 ' + formatBytes(RELAY_MAX_RESTORE_BYTES) + '。'}>
             <input
+              ref={inputRef}
               className={styles.fileInput}
               type="file"
               accept=".backup,application/octet-stream"
               onChange={pickFile}
-              disabled={!ready}
+              disabled={!restoreAllowed}
             />
           </SettingsField>
           <SettingsField label="恢复口令" hint={'与导出时输入的口令一致，至少 ' + MIN_PASSPHRASE + ' 位。'}>
@@ -183,7 +207,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
               onChange={setRestorePhrase}
               placeholder="输入备份口令"
               autoComplete="current-password"
-              disabled={!ready}
+              disabled={!restoreAllowed}
             />
           </SettingsField>
         </div>
@@ -200,7 +224,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
             theme="solid"
             onClick={() => setConfirmOpen(true)}
             disabled={
-              !ready ||
+              !restoreAllowed ||
               !file ||
               restorePhrase.trim().length < MIN_PASSPHRASE ||
               restoreBusy

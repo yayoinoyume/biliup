@@ -17,11 +17,14 @@ const { Text } = Typography
 
 type KeywordKey = 'danmaku_banned_keywords' | 'streaming_banned_keywords'
 
-const parseKeywords = (text: string): string[] =>
-  text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
+const parseKeywords = (text: string): string[] => [
+  ...new Set(
+    text
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0),
+  ),
+]
 
 function BannedKeywordsForm({
   data,
@@ -63,11 +66,7 @@ function BannedKeywordsForm({
     if (!dirty) return
     const expected: Record<string, unknown> = {}
     for (const key of changed) expected[key] = data[key]
-    await state.run(async () => {
-      const message = await relayUpdateBannedKeywords({ ...patch, expected })
-      await onSaved()
-      return message
-    })
+    await state.run(() => relayUpdateBannedKeywords({ ...patch, expected }), onSaved)
   }
 
   return (
@@ -85,7 +84,7 @@ function BannedKeywordsForm({
             placeholder="一行一个；命中后拦截弹幕"
             aria-label="弹幕禁用关键词"
           />
-          <span className={styles.fieldHint}>保存时会去掉首尾空白与空行。</span>
+          <span className={styles.fieldHint}>保存时会去掉首尾空白、空行与重复项。</span>
         </div>
         <div className={styles.field}>
           <span className={styles.fieldLabel}>推流禁用关键词</span>
@@ -98,7 +97,7 @@ function BannedKeywordsForm({
             placeholder="一行一个；命中后不转播该场"
             aria-label="推流禁用关键词"
           />
-          <span className={styles.fieldHint}>保存时会去掉首尾空白与空行。</span>
+          <span className={styles.fieldHint}>保存时会去掉首尾空白、空行与重复项。</span>
         </div>
       </div>
       <SaveRow

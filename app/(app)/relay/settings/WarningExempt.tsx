@@ -72,14 +72,20 @@ function WarningExemptForm({
     channel.name.toLowerCase().includes(query.trim().toLowerCase()),
   )
 
-  const orderedReasons = REASON_OPTIONS.map((option) => option.id).filter((id) =>
+  const knownOrderedReasons = REASON_OPTIONS.map((option) => option.id).filter((id) =>
     reasons.includes(id),
   )
+  const unknownReasons = data.warning_hold_exempt_reasons.filter(
+    (id) => !REASON_OPTIONS.some((option) => option.id === id),
+  )
+  const orderedReasons = [...knownOrderedReasons, ...unknownReasons]
   const initialKeys = data.warning_hold_exempt.map(
     (entry) => entry.platform + ':' + entry.channel_id,
   )
 
   const missingKeys = selected.filter((key) => !catalog.some((entry) => entry.key === key))
+  const catalogUnavailable =
+    data.warning_hold_exempt_channels.length === 0 && data.warning_hold_exempt.length > 0
   const selectedDirty = !sameSet(selected, initialKeys)
   const reasonsDirty = !sameSet(orderedReasons, data.warning_hold_exempt_reasons)
   const allLowRiskDirty = allLowRisk !== data.warning_hold_exempt_all_low_risk
@@ -127,18 +133,22 @@ function WarningExemptForm({
 
   const save = async () => {
     if (!dirty) return
+    if (catalogUnavailable) {
+      Toast.error('频道目录加载失败，已禁止保存以防误清空豁免名单，请刷新重试')
+      return
+    }
     if (allLowRisk && !orderedReasons.includes(LOW_RISK_ID)) {
       Toast.error('「应用到全部频道」需要先勾选挂机 / 录播这类低风险原因')
       return
     }
-    await state.run(async () => {
-      const message = await relayUpdateConfig({
-        ...patch,
-        expected: expectedConfigValues(data, changed),
-      })
-      await onSaved()
-      return message
-    })
+    await state.run(
+      () =>
+        relayUpdateConfig({
+          ...patch,
+          expected: expectedConfigValues(data, changed),
+        }),
+      onSaved,
+    )
   }
 
   return (
@@ -190,6 +200,16 @@ function WarningExemptForm({
         <span className={styles.fieldHint}>
           勾选某个平台的频道身份；名单来自当前 channels.json，已从名单删除的身份保存时会自动剔除。
         </span>
+        {catalogUnavailable ? (
+          <Text type="danger" size="small">
+            频道目录为空（可能加载失败）。当前已选 {data.warning_hold_exempt.length} 个豁免身份，为避免误清空已禁止保存，请刷新重试。
+          </Text>
+        ) : null}
+        {unknownReasons.length > 0 ? (
+          <Text type="warning" size="small">
+            有 {unknownReasons.length} 个历史违规原因不在当前版本的可选项里，保存时会原样回传。
+          </Text>
+        ) : null}
       </div>
 
       <ul className={styles.list}>
@@ -240,6 +260,7 @@ function WarningExemptForm({
       <SaveRow
         dirty={dirty}
         saving={state.saving}
+        disabled={catalogUnavailable}
         onSave={() => {
           void save()
         }}

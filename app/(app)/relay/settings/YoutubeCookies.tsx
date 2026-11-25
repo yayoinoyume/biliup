@@ -113,6 +113,7 @@ export default function YoutubeCookies() {
             link={status?.configured === true}
             onClick={() => {
               if (!status?.configured) return
+              clearState.clearError()
               setConfirmOpen(true)
             }}
           >
@@ -131,6 +132,15 @@ export default function YoutubeCookies() {
           onOk={() => clear()}
           onCancel={() => setConfirmOpen(false)}
         >
+          {clearState.error ? (
+            <SaveErrorBanner
+              error={clearState.error}
+              onReload={() => {
+                setConfirmOpen(false)
+                void cookies.mutate()
+              }}
+            />
+          ) : null}
           <Text>
             将删除已加密保存的 {status.count} 条 Cookie（修订号 {status.revision}）。之后需要重新导入才能继续使用需要登录态的 YouTube 抓取。
           </Text>

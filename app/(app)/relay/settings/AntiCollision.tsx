@@ -100,14 +100,14 @@ function AntiCollisionForm({
 
   const save = async () => {
     if (!dirty) return
-    await state.run(async () => {
-      const message = await relayUpdateConfig({
-        ...patch,
-        expected: expectedConfigValues(data, changed),
-      })
-      await onSaved()
-      return message
-    })
+    await state.run(
+      () =>
+        relayUpdateConfig({
+          ...patch,
+          expected: expectedConfigValues(data, changed),
+        }),
+      onSaved,
+    )
   }
 
   return (

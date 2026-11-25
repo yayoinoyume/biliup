@@ -141,15 +141,15 @@ export default function ProxySettings({ data, onSaved, onReload }: ProxySettings
       Toast.error('WebSub 回调端口需在 1 到 65535 之间')
       return
     }
-    await state.run(async () => {
-      const message = await relayUpdateConfig({
-        ...patch,
-        expected: expectedConfigValues(data, changed),
-        expected_secret_revision: data.secret_revision,
-      })
-      await onSaved()
-      return message
-    })
+    await state.run(
+      () =>
+        relayUpdateConfig({
+          ...patch,
+          expected: expectedConfigValues(data, changed),
+          expected_secret_revision: data.secret_revision,
+        }),
+      onSaved,
+    )
   }
 
   return (

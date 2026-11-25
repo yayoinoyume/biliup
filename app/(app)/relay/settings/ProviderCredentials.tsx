@@ -26,6 +26,7 @@ export function ProviderCredentials({ data, onSaved, onReload }: ProviderCredent
   const [riotKey, setRiotKey] = useState('')
   const [riotClear, setRiotClear] = useState(false)
   const [jwt, setJwt] = useState('')
+  const [jwtClear, setJwtClear] = useState(false)
   const keys = useSettingsSave()
   const token = useSettingsSave()
 
@@ -52,34 +53,38 @@ export function ProviderCredentials({ data, onSaved, onReload }: ProviderCredent
   }
 
   const dirty = changed.length > 0
-  const jwtDirty = jwt.trim().length > 0
+  const jwtDirty = jwt.trim().length > 0 || jwtClear
 
   const saveKeys = async () => {
     if (!dirty) return
-    await keys.run(async () => {
-      const message = await relayUpdateConfig({
-        ...patch,
-        expected: expectedConfigValues(data, changed),
-        expected_secret_revision: data.secret_revision,
-      })
-      await onSaved()
-      return message
-    })
+    await keys.run(
+      () =>
+        relayUpdateConfig({
+          ...patch,
+          expected: expectedConfigValues(data, changed),
+          expected_secret_revision: data.secret_revision,
+        }),
+      onSaved,
+    )
   }
 
   const saveToken = async () => {
     if (!jwtDirty) {
-      Toast.error('先填写 Holodex 登录令牌（JWT）')
+      Toast.error('先填写 Holodex 登录令牌（JWT），或勾选清除已保存的令牌')
       return
     }
-    await token.run(async () => {
-      const message = await relayUpdateConfig({
-        holodex_jwt: jwt.trim(),
-        expected_secret_revision: data.secret_revision,
-      })
-      await onSaved()
-      return message
-    })
+    const ok = await token.run(
+      () =>
+        relayUpdateConfig({
+          holodex_jwt: jwtClear ? '' : jwt.trim(),
+          expected_secret_revision: data.secret_revision,
+        }),
+      onSaved,
+    )
+    if (ok) {
+      setJwt('')
+      setJwtClear(false)
+    }
   }
 
   return (
@@ -131,7 +136,7 @@ export function ProviderCredentials({ data, onSaved, onReload }: ProviderCredent
       <SaveErrorBanner error={token.error} onReload={onReload} />
       <SettingsCard
         title="Holodex 登录令牌"
-        description="令牌不在配置表单的三方校验键清单里，因此单独提交；留空不会清除，勾选下方的清除按钮才会移除。"
+        description="令牌不在配置表单的三方校验键清单里，因此单独提交；填写新令牌表示替换，勾选「保存时清除已保存的内容」并保存表示移除。"
         extra={
           <Tag size="small" color={data.holodex_jwt_configured ? 'green' : 'grey'}>
             {data.holodex_jwt_configured ? '已登录' : '未配置'}
@@ -146,6 +151,8 @@ export function ProviderCredentials({ data, onSaved, onReload }: ProviderCredent
           configured={data.holodex_jwt_configured}
           multiline
           rows={3}
+          clearRequested={jwtClear}
+          onClearChange={setJwtClear}
           placeholder={data.holodex_jwt_configured ? '已保存，填写新令牌表示替换' : '粘贴 Holodex 登录令牌'}
         />
         <Text type="tertiary" size="small">
@@ -159,6 +166,7 @@ export function ProviderCredentials({ data, onSaved, onReload }: ProviderCredent
           }}
           onReset={() => {
             setJwt('')
+            setJwtClear(false)
             token.clearError()
           }}
           okText="更新登录令牌"

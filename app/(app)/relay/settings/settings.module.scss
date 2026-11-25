@@ -107,6 +107,7 @@
 
 .qrImage {
   border-radius: 8px;
+  /* 二维码固定纯白底：深色主题下反色会降低手机扫码识别率，因此不跟随主题变量。 */
   background: #fff;
   padding: 8px;
 }
