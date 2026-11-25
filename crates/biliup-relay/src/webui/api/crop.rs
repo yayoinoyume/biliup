@@ -7,10 +7,12 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
+use axum::response::Response;
 use base64::Engine as _;
 use serde::Deserialize;
 
 use super::ApiResponse;
+use super::config_read_response;
 use super::config_save_status;
 use crate::config::{CropConfig, FfmpegCache, load_config};
 use crate::plugins::set_config_updated;
@@ -370,10 +372,8 @@ pub(crate) fn crop_config_from_update(
 
 pub async fn get_crop(
     platform: String,
-) -> Result<Json<ApiResponse<Option<CropConfig>>>, StatusCode> {
-    let cfg = load_config()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<ApiResponse<Option<CropConfig>>>, Response> {
+    let cfg = load_config().await.map_err(|e| config_read_response(&*e))?;
 
     let crop = match platform.as_str() {
         "youtube" => cfg.youtube.crop,
@@ -443,10 +443,8 @@ pub async fn update_ffmpeg_cache(
 
 pub async fn get_ffmpeg_cache(
     platform: String,
-) -> Result<Json<ApiResponse<FfmpegCache>>, StatusCode> {
-    let cfg = load_config()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<ApiResponse<FfmpegCache>>, Response> {
+    let cfg = load_config().await.map_err(|e| config_read_response(&*e))?;
 
     let cache = match platform.as_str() {
         "youtube" => cfg.youtube.ffmpeg_cache.clone(),

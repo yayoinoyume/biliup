@@ -5,9 +5,11 @@ use std::path::Path;
 
 use axum::extract::Json;
 use axum::http::StatusCode;
+use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use super::config_read_response;
 use super::status::{refresh_niconico_status, refresh_twitch_status, refresh_youtube_status};
 use super::{config_save_status, validate_edit_preconditions, ApiResponse, EDIT_CONFLICT, EDIT_INVALID};
 use crate::config::{load_config, Config};
@@ -530,16 +532,16 @@ pub async fn update_channel(
     })
 }
 
-pub async fn get_channels() -> Result<Json<serde_json::Value>, StatusCode> {
+pub async fn get_channels() -> Result<Json<serde_json::Value>, Response> {
     crate::storage::read_document("channels.json")
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| config_read_response(&e))
 }
 
-pub async fn get_areas() -> Result<Json<serde_json::Value>, StatusCode> {
+pub async fn get_areas() -> Result<Json<serde_json::Value>, Response> {
     crate::storage::read_document("areas.json")
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| config_read_response(&e))
 }
 
 #[derive(Serialize)]
@@ -548,9 +550,9 @@ pub struct BannedKeywordsResponse {
     streaming_banned_keywords: Vec<String>,
 }
 
-pub async fn get_banned_keywords() -> Result<Json<BannedKeywordsResponse>, StatusCode> {
+pub async fn get_banned_keywords() -> Result<Json<BannedKeywordsResponse>, Response> {
     let data: serde_json::Value = crate::storage::read_document("areas.json")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| config_read_response(&e))?;
 
     let danmaku_banned = data["banned_keywords"]
         .as_array()

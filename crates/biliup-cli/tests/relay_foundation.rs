@@ -240,8 +240,8 @@ fn seed_min_config() {
     biliup_relay::storage::write_document("config.json", &seeded).expect("写入最小配置");
 }
 
-/// `manage/*` 的写端点要读 areas.json：缺文档时一律 500（数据不存在）。
-/// 补一份最小的合法文档，写入路径才是真的可写、而不是靠 500 蒙过去。
+/// manage 写端点要读 areas.json：缺文档时写入被拒；只读的 GET /v1/relay/areas
+/// 则是 412（未配置）。补一份最小的合法文档，读写路径才都是真的可用。
 fn seed_min_areas() {
     biliup_relay::storage::write_document("areas.json", &serde_json::json!({ "areas": [] }))
         .expect("写入最小分区文档");
@@ -667,4 +667,97 @@ async fn websub_callback_is_mounted_outside_the_login_guard() {
     );
 
     stop_and_assert_released(port, stop, task).await;
+}
+
+/// 全新安装、还没跑完设置向导：这些只读端点必须 412 not_configured，绝不是 500。
+const UNCONFIGURED_READ_ROUTES: [&str; 12] = [
+    "/v1/relay/config",
+    "/v1/relay/channels",
+    "/v1/relay/areas",
+    "/v1/relay/banned-keywords",
+    "/v1/relay/niconico/session",
+    "/v1/relay/history/status",
+    "/v1/relay/history/summary",
+    "/v1/relay/history/sessions",
+    "/v1/relay/history/events",
+    "/v1/relay/history/stats",
+    "/v1/relay/crop/youtube",
+    "/v1/relay/ffmpeg-cache/youtube",
+];
+
+fn seed_min_channels() {
+    biliup_relay::storage::write_document("channels.json", &serde_json::json!({ "channels": [] }))
+        .expect("写入最小频道文档");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_read_endpoints_answer_412_before_the_wizard_ran() {
+    let _serial = SERIAL.lock().await;
+    let logging = init_tracing_with("info", false);
+    let key_dir = tempfile::tempdir().unwrap();
+    let home_keys_before = home_key_files();
+    let _key_env = EnvVarGuard::set("BILISTREAM_KEY_FILE", key_dir.path().join("master.key"));
+    let work_dir = tempfile::tempdir().unwrap();
+    let (port, stop, task) = spawn_server(false, work_dir.path(), &logging);
+    let (status, body) = wait_for_answer(port).await;
+    assert_eq!(status, 200, "{body}");
+
+    for path in UNCONFIGURED_READ_ROUTES {
+        let reply = request(port, "GET", path, None, "").await;
+        assert_eq!(
+            reply.status, 412,
+            "未配置态 {path} 必须 412，实际 {}：{}",
+            reply.status, reply.body
+        );
+        let body: serde_json::Value = serde_json::from_str(&reply.body)
+            .unwrap_or_else(|error| panic!("{path} 响应不是 JSON（{error}）：{}", reply.body));
+        assert_eq!(body["success"], serde_json::json!(false), "{path}：{}", reply.body);
+        assert_eq!(
+            body["code"],
+            serde_json::json!("not_configured"),
+            "{path}：{}",
+            reply.body
+        );
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(!message.trim().is_empty(), "{path} 未配置提示不能为空：{}", reply.body);
+    }
+
+    // /status 的契约不同：未配置也是 200，靠 success=false 与文案提示去向导。
+    let reply = request(port, "GET", "/v1/relay/status", None, "").await;
+    assert_eq!(reply.status, 200, "未配置态 /v1/relay/status 仍是 200：{}", reply.body);
+    assert!(reply.body.contains(r#""success":false"#), "{}", reply.body);
+    assert!(
+        reply.body.contains("配置文件不存在，请完成首次设置"),
+        "未配置文案没有命中：{}",
+        reply.body
+    );
+
+    seed_min_config();
+    seed_min_areas();
+    seed_min_channels();
+    for path in UNCONFIGURED_READ_ROUTES {
+        let reply = request(port, "GET", path, None, "").await;
+        assert_ne!(
+            reply.status, 412,
+            "配置写好后 {path} 不该再 412：{}",
+            reply.body
+        );
+    }
+    // 只依赖 config.json / channels.json / areas.json 的端点必须真的回到 200。
+    for path in [
+        "/v1/relay/config",
+        "/v1/relay/channels",
+        "/v1/relay/areas",
+        "/v1/relay/banned-keywords",
+        "/v1/relay/niconico/session",
+        "/v1/relay/history/status",
+        "/v1/relay/crop/youtube",
+        "/v1/relay/ffmpeg-cache/youtube",
+    ] {
+        let reply = request(port, "GET", path, None, "").await;
+        assert_eq!(reply.status, 200, "配置写好后 {path}：{}", reply.body);
+    }
+
+    stop_and_assert_released(port, stop, task).await;
+    assert_eq!(home_key_files(), home_keys_before, "测试不得写入真实密钥目录");
 }

@@ -116,6 +116,33 @@ RUN set -eux; \
 		/var/log/* \
 	;
 
+RUN set -eux; \
+	arch="$(dpkg --print-architecture)"; \
+	case "$arch" in \
+		'amd64') \
+			url='https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip'; \
+			zip_sha256='e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609'; \
+			deno_sha256='368bca08999e02c6911b8f248167b582276b1f547db5712b6e736d7eda1dbda7'; \
+		;; \
+		'arm64') \
+			url='https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-unknown-linux-gnu.zip'; \
+			zip_sha256='d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905'; \
+			deno_sha256='b484f780e5149ca05c673f1f79f7fb466f12a2295933bdad917af4a8a5c020e8'; \
+		;; \
+		*) \
+			echo "Deno v2.9.8 没有 $arch 的官方构建，跳过安装" >&2; \
+			exit 0; \
+		;; \
+	esac; \
+	mkdir -p /tmp/deno; \
+	curl -fsSL --retry 3 -o /tmp/deno/deno.zip "$url"; \
+	echo "$zip_sha256  /tmp/deno/deno.zip" | sha256sum -c -; \
+	python3 -c "import zipfile; zipfile.ZipFile('/tmp/deno/deno.zip').extract('deno', '/tmp/deno')"; \
+	echo "$deno_sha256  /tmp/deno/deno" | sha256sum -c -; \
+	install -m 0755 /tmp/deno/deno /usr/local/bin/deno; \
+	rm -rf /tmp/deno; \
+	/usr/local/bin/deno --version
+
 WORKDIR /opt
 
 ENTRYPOINT ["biliup"]

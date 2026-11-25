@@ -16,6 +16,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::not_configured_response;
 use crate::cluster::peer_call::{PeerCallError, routes};
 use crate::config::Config;
 use crate::history::MissingNode;
@@ -606,6 +607,7 @@ async fn handle_admitted(
 ) -> Response {
     let cfg = match crate::config::load_config().await {
         Ok(cfg) => cfg,
+        Err(e) if crate::config::is_not_configured_error(&*e) => return not_configured_response(),
         Err(_) => return fail(StatusCode::INTERNAL_SERVER_ERROR, "读取配置失败"),
     };
     let peers = LivePeers { cfg: &cfg };
@@ -775,6 +777,7 @@ pub(crate) fn status_value(cfg: &Config) -> Value {
 pub async fn status(headers: HeaderMap) -> Response {
     let cfg = match crate::config::load_config().await {
         Ok(cfg) => cfg,
+        Err(e) if crate::config::is_not_configured_error(&*e) => return not_configured_response(),
         Err(_) => return fail(StatusCode::INTERNAL_SERVER_ERROR, "读取配置失败"),
     };
     let permit = match acquire_db_slot(&QUERIES).await {

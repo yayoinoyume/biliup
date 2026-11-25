@@ -23,6 +23,7 @@
 - **压制、导出与投稿**：集中查看自动转封装（remux）、压制和工程导出的任务进度，成片可直接投稿；支持自定义投稿元信息及边录边传、0 落盘。
 - **AI 与流程自动化**：大模型推荐高光片段，人工确认后切片；支持剪辑助手、命令行和 Agent skill，让你的 Agent 成为 up 主：`npx skills add biliup/biliup`。
 - **灵活部署与多机协作**：提供多种安装方式和可视化 WebUI；Fleet 控制面统一分派录制房间，节点凭票据加入，并支持多用户、三种角色分级权限。
+- **直播转播（Relay）**：监控 YouTube / Twitch / Niconico 的直播，自动转推到 B 站直播间；含首次配置向导、时移缓存、画面裁剪、弹幕指令与推流统计。
 
 论坛：[BBS](https://bbs.biliup.rs)
 
@@ -196,6 +197,18 @@ user_cookie = "cookies.json"
 - B 站直链约 1 小时过期。分段结束后拉不到数据时会立刻交回监控循环重新解析直链，并在同一稿件上继续追加分 P。
 - 排查问题时留意 `ERROR ... 下载流程出错` 日志：会带上具体原因（cookies 文件路径、preupload 拒绝等），而不是静默退回落盘录制。
 
+## 📡 直播转播
+
+把 YouTube / Twitch / Niconico 的直播转到 B 站直播间。这里的「直播转播」指外部平台到 B 站的转推；多机录制 Fleet 里节点与控制面之间的 relay 通道是另一套东西。
+
+- **无人值守**：按检测间隔轮询外部平台，主播开播自动在 B 站开播、下播自动停播；`/relay` 页也能手动开播 / 停播 / 重启。
+- **取流与推流**：YouTube 走 `yt-dlp`，Twitch 与 Niconico 走 `streamlink`，再由 `ffmpeg` 推流；可选时移缓存（按 1–60 秒延迟缓存后再推）与画面裁剪。
+- **弹幕与风控**：弹幕指令可以控制开播 / 停播；命中违禁词的直播会被停播，直播间封禁期间不会反复尝试开播。
+- **配置与备份**：配置、Cookie 与监控数据都在加密 SQLite 里；`/relay/settings` 可导出加密备份，恢复只允许在空数据目录上做，所以从旧版 `bilistream` 迁移要在首次配置之前完成。
+- **统计与日志**：`/relay/analytics` 看场次、时长、可靠性与开播日历，`/relay/logs` 看实时日志。
+- **入口**：侧边栏「直播转播」（`/relay`），首次配置向导在 `/relay/setup`。
+- **依赖**：`ffmpeg`、`yt-dlp`、`streamlink`，以及 YouTube 抓流需要的 `deno`（新版 `yt-dlp` 解析 YouTube 要 JS 运行时）。官方 Docker 镜像已内置这四个，自己部署要装进 `PATH`。
+
 ## 🔐 用户与权限
 
 `--auth` 下首次访问设置的 `biliup` 账号是超级管理员，其他用户在「用户管理」添加：
@@ -302,6 +315,7 @@ biliup season sort <小节ID> <episode ID>...       # 列出的稿件按顺序�
 ## 📚 文档与更新日志
 
 - [使用文档 »](https://biliup.github.io/biliup/docs/guide/introduction/)
+- [直播转播教程 »](https://biliup.github.io/biliup/docs/tutorials/live-relay/)
 - [命令行文档 »](https://biliup.github.io/biliup-rs)
 - [更新日志 »](https://biliup.github.io/biliup/docs/guide/changelog)
 

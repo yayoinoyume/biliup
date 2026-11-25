@@ -15,6 +15,7 @@
 
 - [斗鱼 Cookie、自动续期与画质](content/docs/tutorials/douyu-cookie-guide.md)
 - [录制分段、画面遮挡与录像合并](content/docs/tutorials/recording-and-masking.md)
+- [直播转播（Relay）](content/docs/tutorials/live-relay.md)
 
 ## 本地预览
 

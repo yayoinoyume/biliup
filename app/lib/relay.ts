@@ -28,6 +28,7 @@ const STATUS_ERROR_CODES: Record<number, string> = {
   404: 'not_found',
   405: 'method_not_allowed',
   409: 'conflict',
+  412: 'not_configured',
   413: 'too_large',
   422: 'unprocessable',
   429: 'rate_limited',

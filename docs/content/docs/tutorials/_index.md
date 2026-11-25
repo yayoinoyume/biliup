@@ -13,3 +13,4 @@ draft = false
 
 - [斗鱼登录、Cookie 续期与画质设置](@/docs/tutorials/douyu-cookie-guide.md)
 - [录制分段、画面遮挡与本地合并](@/docs/tutorials/recording-and-masking.md)
+- [直播转播（Relay）](@/docs/tutorials/live-relay.md)

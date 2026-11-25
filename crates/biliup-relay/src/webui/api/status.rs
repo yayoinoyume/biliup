@@ -4,10 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use super::ApiResponse;
+use super::config_read_response;
 use crate::compat::cluster;
 use crate::config::{load_config, Config};
 use crate::logging::safe_diagnostic;
@@ -370,14 +371,14 @@ pub async fn get_status() -> impl IntoResponse {
             if get_status_cache().is_some() {
                 tracing::debug!("Skipped status config refresh: {}", e);
             } else {
-                let is_not_found = e.to_string().contains("No such file");
-                if !is_not_found {
+                let is_not_configured = crate::config::is_not_configured_error(&*e);
+                if !is_not_configured {
                     tracing::error!("配置加载失败：{}", safe_diagnostic(&e.to_string()));
                 }
 
                 let error_msg = if e.to_string().contains("Permission denied") {
                     format!("配置文件权限错误：{}。请确保 config.json 文件存在且有读取权限，或在可执行文件所在目录运行程序。", e)
-                } else if is_not_found {
+                } else if is_not_configured {
                     "配置文件不存在，请完成首次设置".to_string()
                 } else {
                     format!("配置加载失败：{}", e)
@@ -588,10 +589,8 @@ pub async fn refresh_priority_channel_status() -> Json<ApiResponse<()>> {
 }
 
 pub async fn niconico_session_status(
-) -> Result<Json<ApiResponse<niconico_session::SessionStatus>>, StatusCode> {
-    let cfg = load_config()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<ApiResponse<niconico_session::SessionStatus>>, Response> {
+    let cfg = load_config().await.map_err(|e| config_read_response(&*e))?;
     Ok(Json(ApiResponse {
         success: true,
         data: Some(niconico_session::status(&cfg)),

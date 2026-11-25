@@ -973,6 +973,30 @@ async fn load_credentials() -> Result<Credentials, Box<dyn Error>> {
     Credentials::from_cookies(&cookies_file.cookie_info.cookies)
 }
 
+/// 设置向导还没写过的配置文档：未配置态，不是故障。
+///
+/// 专有类型而非文案匹配：只读接口靠它把「未配置」（412）与读盘、
+/// 解密、数据库和反序列化失败（500）分开。
+#[derive(Debug)]
+struct NotConfiguredError(&'static str);
+
+impl std::fmt::Display for NotConfiguredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl Error for NotConfiguredError {}
+
+/// 该错误是否只是「还没配置」：专有错误，或缺文档的 NotFound。
+/// 权限拒绝、解密失败、数据库与反序列化错误都是真实故障。
+pub(crate) fn is_not_configured_error(error: &(dyn Error + 'static)) -> bool {
+    error.is::<NotConfiguredError>()
+        || error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// Loads the configuration along with credentials from cookies.json.
 pub async fn load_config() -> Result<Config, Box<dyn Error>> {
     let revision = CONFIG_REVISION.load(Ordering::Acquire);
@@ -1002,7 +1026,7 @@ async fn read_config() -> Result<Config, Box<dyn Error>> {
     let snapshot = crate::storage::global()?.read_many(&[CONFIG_DOCUMENT, COOKIES_DOCUMENT])?;
     let config = snapshot
         .get("config.json")
-        .ok_or("尚未配置，请完成设置向导")?;
+        .ok_or(NotConfiguredError("尚未配置，请完成设置向导"))?;
     let cookies = snapshot.get("cookies.json").map(|doc| &doc.value);
     config_from_documents(&config.value, cookies)
 }
@@ -1388,6 +1412,33 @@ fn apply_priority_channel_lookup(priority: &mut PriorityChannel, channel: Option
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn a_fresh_store_reports_not_configured_instead_of_a_failure() {
+        let _guard = crate::storage::lock_test_global();
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::init(&dir.path().join("data"), Some(&dir.path().join("key"))).unwrap();
+
+        let error = super::load_config().await.err().expect("空存储读不到配置");
+
+        assert!(super::is_not_configured_error(&*error));
+        assert_eq!(error.to_string(), "尚未配置，请完成设置向导");
+    }
+
+    #[test]
+    fn read_failures_are_not_mistaken_for_a_fresh_install() {
+        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "尚未配置 areas.json");
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "拒绝访问");
+        let corrupt = std::io::Error::new(std::io::ErrorKind::InvalidData, "数据格式无效");
+        let database = std::io::Error::other("本地数据库操作失败");
+        let decode: serde_json::Error = serde_json::from_str::<Config>("[]").unwrap_err();
+
+        assert!(super::is_not_configured_error(&missing));
+        for error in [&denied as &(dyn Error + 'static), &corrupt, &database, &decode] {
+            assert!(!super::is_not_configured_error(error), "{error}");
+        }
+    }
+
     #[test]
     fn config_debug_never_contains_a_stream_key_api_key_or_session() {
         let mut config = crate::test_support::config("synthetic-node", 0);

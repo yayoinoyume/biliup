@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use axum::extract::Json;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -11,20 +12,21 @@ use super::stream_control::{
     monitor_toggle_enable_rejected_response, niconico_monitor_reload_needed,
     twitch_monitor_reload_needed, youtube_monitor_reload_needed,
 };
-use super::{ApiResponse, EDIT_CONFLICT, config_save_status, validate_edit_preconditions};
+use super::{
+    ApiResponse, EDIT_CONFLICT, config_read_response, config_save_status,
+    validate_edit_preconditions,
+};
 use crate::config::{ClusterConfig, Config, HistoryConfig, load_config};
 use crate::plugins::set_config_updated;
 use crate::webui::api::status::refresh_priority_channel_status;
 use crate::webui::state::{refresh_status_cache_config_from, request_status_refresh};
 
-pub async fn get_config() -> Result<Json<serde_json::Value>, StatusCode> {
-    let cfg = load_config()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+pub async fn get_config() -> Result<Json<serde_json::Value>, Response> {
+    let cfg = load_config().await.map_err(|e| config_read_response(&*e))?;
     // 名单目录要读存储：整段投影放到阻塞线程，绝不占用 tokio worker。
     let response = tokio::task::spawn_blocking(move || config_response(&cfg))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     Ok(Json(response))
 }
 

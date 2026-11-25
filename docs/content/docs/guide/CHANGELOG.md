@@ -41,6 +41,10 @@ top = false
 - ⚠️主播的「ffmpeg参数」（`opt_args`）重新生效：用 ffmpeg 录制时和 1.0.7 一样作为输出参数传给 ffmpeg（加在输出文件名之前）；其它下载插件不使用，只在日志里提示。以前填过、一直没起作用的参数升级后会开始生效，请检查。
 - ⚠️「ffmpeg参数」能让 ffmpeg 往任意路径写文件，现在和处理器里的 run 命令一样只有超级管理员能查看和修改，其他角色保存主播时保持原值。Fleet 里设了 ffmpeg 参数的房间只派给加入时带了 `--allow-hooks`（或启用「本机」时勾选「允许钩子」）的节点。已经派到不允许钩子的节点上的这类房间，节点升级后会被节点移除、停止录制，控制面显示为失败并给出原因；要继续录制，请把房间改派到允许钩子的节点、让节点带 `--allow-hooks` 重新加入（「本机」重新启用时勾选「允许钩子」），或者清空这些房间的 ffmpeg 参数。
 
+- 💡新增直播转播整合：监控 YouTube / Twitch / Niconico 的直播并自动转推到 B 站直播间，含 `/relay`、`/relay/setup`、`/relay/manage`、`/relay/settings`、`/relay/analytics`、`/relay/logs` 六个页面，说明见[直播转播（Relay）](@/docs/tutorials/live-relay.md)。
+- 🔧转播只读接口在未完成首次配置时统一返回 `412` 与 `{"success":false,"code":"not_configured"}`，不再一律 `500`；读盘、解密、数据库与反序列化失败仍是 `500`。`/v1/relay/status` 的未配置判定改用同一套逻辑，不再靠英文字符串匹配。
+- 💡Docker 镜像内置 `deno` 2.9.8（amd64 / arm64，按 SHA-256 校验），供 `yt-dlp` 抓取 YouTube 使用。
+
 ## 1.2.1
 **Full Changelog**:[v1.2.0...v1.2.1](https://github.com/biliup/biliup/compare/v1.2.0...v1.2.1)
 

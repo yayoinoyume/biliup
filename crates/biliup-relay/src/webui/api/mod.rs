@@ -42,6 +42,34 @@ pub(crate) fn config_save_status(error: Box<dyn std::error::Error>) -> StatusCod
     }
 }
 
+/// 未配置态的业务码：前端按它把提示切到设置向导。
+pub(crate) const NOT_CONFIGURED_CODE: &str = "not_configured";
+
+/// 未配置态的统一出口：412 加 success=false、code=not_configured 的 JSON。
+pub(crate) fn not_configured_response() -> Response {
+    (
+        StatusCode::PRECONDITION_FAILED,
+        Json(serde_json::json!({
+            "success": false,
+            "code": NOT_CONFIGURED_CODE,
+            "message": "尚未配置，请完成设置向导",
+        })),
+    )
+        .into_response()
+}
+
+/// 配置类读取失败的分流：未配置回 412，其余仍是 500 并留一条脱敏日志。
+pub(crate) fn config_read_response(error: &(dyn std::error::Error + 'static)) -> Response {
+    if crate::config::is_not_configured_error(error) {
+        return not_configured_response();
+    }
+    tracing::error!(
+        "配置读取失败：{}",
+        crate::logging::safe_diagnostic(&error.to_string())
+    );
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
 #[derive(Serialize)]
 pub struct ApiResponse<T> {
     success: bool,
@@ -82,6 +110,41 @@ pub(crate) fn validate_edit_preconditions(
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn unconfigured_reads_answer_412_with_the_wizard_code() {
+        use axum::body::to_bytes;
+
+        let response = super::not_configured_response();
+        assert_eq!(response.status(), axum::http::StatusCode::PRECONDITION_FAILED);
+        let bytes = to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["success"], json!(false));
+        assert_eq!(body["code"], json!("not_configured"));
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| !message.trim().is_empty()),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_config_failures_stay_500_while_a_missing_document_is_412() {
+        use axum::http::StatusCode;
+
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "拒绝访问");
+        assert_eq!(
+            super::config_read_response(&denied).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "尚未配置 areas.json");
+        assert_eq!(
+            super::config_read_response(&missing).status(),
+            StatusCode::PRECONDITION_FAILED
+        );
+    }
+
     use super::status::apply_effective_local_monitor_state;
     use super::stream_control::{twitch_monitor_toggle_matches, youtube_monitor_toggle_matches};
     use super::{validate_edit_preconditions, EDIT_CONFLICT, EDIT_INVALID};
