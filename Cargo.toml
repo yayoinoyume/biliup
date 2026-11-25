@@ -6,6 +6,7 @@ members = [
     "crates/danmaku",
     "crates/danmaku-factory",
     "crates/biliup-relay",
+    "crates/biliup-accounts",
 ]
 resolver = "3"
 
