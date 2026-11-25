@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Push discovery through YouTube's WebSub (PubSubHubbub) hub.
 //!
 //! The hub POSTs a small Atom snippet to our callback whenever a subscribed
@@ -60,7 +59,8 @@ static HUB: Mutex<Option<Hub>> = Mutex::new(None);
 static PUSH_WAKE: Notify = Notify::const_new();
 static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn set_webui_port(port: u16) {
+/// 面板监听端口注册口：回调监听要避开它，否则两个监听器会抢同一个端口。
+pub fn set_webui_port(port: u16) {
     WEBUI_PORT.store(port, Ordering::SeqCst);
 }
 

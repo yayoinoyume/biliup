@@ -80,18 +80,88 @@ async fn try_request(
     })
 }
 
-/// 大请求体走真正的 HTTP 客户端：413 时服务会先回包再断开，裸 TCP 读不到。
-async fn post_status(port: u16, path: &str, cookie: &str, body: &str) -> u16 {
-    reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}{path}"))
-        .header(reqwest::header::COOKIE, cookie)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body.to_owned())
-        .send()
+/// 大请求体：全双工并发读写，带有限重试。
+///
+/// 服务端检测到超限会立刻写出 413 再关连接、不排空剩下的请求体，内核因此回 RST。
+/// 「先写完再读」的单线程写法会把这个 413 连同接收缓冲区一起丢掉，所以写侧跑在
+/// 独立任务里、读侧在同一个连接上并发读；写侧只把 BrokenPipe / ConnectionReset /
+/// ConnectionAborted 当作正常的提前收场。
+///
+/// 写半必须活到读侧读完响应为止：服务端回包前看到写半关闭，会当成连接已结束而
+/// 直接丢弃响应（不再回任何字节），所以写任务写完先等一个放行信号再关。
+///
+/// RST 仍可能把已经写出的 413 在内核里丢掉（这是 TCP 的时序，不是服务端没回）。
+/// 这种情况下重开一条连接重试，判据不变：只有真正解析出状态行才算数，
+/// 绝不把 RST 当成 413。
+async fn oversized_status(port: u16, path: &str, cookie: &str, body: &str) -> u16 {
+    for attempt in 1..=3 {
+        if let Some(status) = oversized_status_once(port, path, cookie, body).await {
+            return status;
+        }
+        assert!(
+            attempt < 3,
+            "POST {path} 连试三次都没有拿到状态行（只看到连接被重置）"
+        );
+    }
+    unreachable!("上面的断言保证第三次失败就 panic")
+}
+
+async fn oversized_status_once(port: u16, path: &str, cookie: &str, body: &str) -> Option<u16> {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
-        .expect("发送大请求")
-        .status()
-        .as_u16()
+        .expect("连接测试服务");
+    let mut head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: application/json\r\n",
+        body.len()
+    );
+    if !cookie.is_empty() {
+        head.push_str(&format!("Cookie: {cookie}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).await.expect("写出请求头");
+    let (mut reader, mut writer) = stream.into_split();
+    let payload = body.to_owned();
+    let label = path.to_owned();
+    let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+    let writing = tokio::spawn(async move {
+        let mut failure = None;
+        for chunk in payload.as_bytes().chunks(64 * 1024) {
+            if let Err(error) = writer.write_all(chunk).await {
+                failure = Some(error);
+                break;
+            }
+        }
+        let _ = finished.await;
+        drop(writer);
+        failure
+    });
+    let raw = tokio::time::timeout(Duration::from_secs(30), async move {
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 16384];
+        loop {
+            match reader.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(len) => raw.extend_from_slice(&chunk[..len]),
+            }
+        }
+        raw
+    })
+    .await
+    .expect("读取响应超时");
+    let _ = finish.send(());
+    if let Ok(Some(error)) = writing.await {
+        match error.kind() {
+            std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted => {}
+            _ => panic!("{label} 写请求体意外失败：{error}"),
+        }
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    text.lines()
+        .next()
+        .and_then(|line| line.split(' ').nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
 }
 
 /// 头部名大小写不敏感；值原样返回（会话 id 是大小写敏感的 base64）。
@@ -132,6 +202,31 @@ async fn create_user(
     serde_json::from_str::<serde_json::Value>(&reply.body).unwrap()["id"]
         .as_i64()
         .expect("新建用户必须返回 id")
+}
+
+/// 直接写一份最小配置：只为了让需要 config.json 的只读端点有东西可读，
+/// 且不触发任何后台刷新（向导路由会顺带唤醒状态轮询去联网）。
+fn seed_min_config() {
+    let seeded: biliup_relay::Config = serde_json::from_value(serde_json::json!({
+        "auto_cover": false,
+        "enable_anti_collision": false,
+        "interval": 3600,
+        "bililive": {
+            "enable_danmaku_command": false,
+            "room": 1,
+            "bili_rtmp_url": "",
+            "bili_rtmp_key": ""
+        },
+        "twitch": {},
+        "youtube": {},
+        "holodex_api_key": null,
+        "riot_api_key": null,
+        "enable_lol_monitor": false,
+        "lol_monitor_interval": null,
+        "anti_collision_list": {}
+    }))
+    .expect("最小配置必须能反序列化");
+    biliup_relay::storage::write_document("config.json", &seeded).expect("写入最小配置");
 }
 
 async fn login(port: u16, username: &str, password: &str) -> String {
@@ -230,22 +325,26 @@ async fn stop_and_assert_released(
     );
 }
 
-struct KeyFileEnv(Option<std::ffi::OsString>);
+/// 环境变量守卫：断言失败也要恢复原值，别把设置漏给同进程的其它测试。
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
 
-impl KeyFileEnv {
-    fn set(path: &std::path::Path) -> Self {
-        let previous = std::env::var_os("BILISTREAM_KEY_FILE");
-        unsafe { std::env::set_var("BILISTREAM_KEY_FILE", path) };
-        Self(previous)
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
     }
 }
 
-impl Drop for KeyFileEnv {
+impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         unsafe {
-            match self.0.take() {
-                Some(value) => std::env::set_var("BILISTREAM_KEY_FILE", value),
-                None => std::env::remove_var("BILISTREAM_KEY_FILE"),
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -290,7 +389,7 @@ async fn relay_health_is_ready_behind_optional_auth() {
     let key_dir = tempfile::tempdir().unwrap();
     let key_file = key_dir.path().join("master.key");
     let home_keys_before = home_key_files();
-    let _key_env = KeyFileEnv::set(&key_file);
+    let _key_env = EnvVarGuard::set("BILISTREAM_KEY_FILE", &key_file);
 
     let open_dir = tempfile::tempdir().unwrap();
     let (port, stop, task) = spawn_server(false, open_dir.path(), &logging);
@@ -333,13 +432,16 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
     let logging = init_tracing_with("info", false);
     let key_dir = tempfile::tempdir().unwrap();
     let home_keys_before = home_key_files();
-    let _key_env = KeyFileEnv::set(&key_dir.path().join("master.key"));
+    let _key_env = EnvVarGuard::set("BILISTREAM_KEY_FILE", key_dir.path().join("master.key"));
     let work_dir = tempfile::tempdir().unwrap();
     let (port, stop, task) = spawn_server(true, work_dir.path(), &logging);
     let (status, _) = wait_for_answer(port).await;
     assert_eq!(status, 401, "开启 --auth 后未登录访问 /v1/relay/health 应被拦截");
 
     let admin = bootstrap_admin(port, "boss-password").await;
+    // /v1/relay/history/status 要读 config.json。直接写文档而不走向导路由：
+    // 向导会 request_status_refresh() 唤醒状态轮询，进而真的去问 B 站（测试必须离线）。
+    seed_min_config();
     create_user(port, &admin, "op", "op-password", "operator").await;
     create_user(port, &admin, "ro", "ro-password", "viewer").await;
     let operator = login(port, "op", "op-password").await;
@@ -356,14 +458,21 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
 
     for path in [
         "/v1/relay/status",
-        "/v1/relay/config",
         "/v1/relay/history/status",
-        "/v1/relay/manage/areas",
         "/v1/relay/setup-status",
     ] {
         let reply = request(port, "GET", path, Some(&viewer), "").await;
         assert!(
-            reply.status != 401 && reply.status != 403,
+            (200..300).contains(&reply.status),
+            "不依赖外部配置的只读端点 {path} 必须是 2xx：{} {}",
+            reply.status,
+            reply.body
+        );
+    }
+    for path in ["/v1/relay/config", "/v1/relay/manage/areas"] {
+        let reply = request(port, "GET", path, Some(&viewer), "").await;
+        assert!(
+            !matches!(reply.status, 401 | 403 | 404 | 405),
             "只读角色访问 {path} 被拒：{}",
             reply.status
         );
@@ -388,7 +497,7 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
     ] {
         let reply = request(port, method, path, Some(&operator), "").await;
         assert!(
-            reply.status != 401 && reply.status != 403,
+            !matches!(reply.status, 401 | 403 | 404 | 405),
             "操作员访问 {method} {path} 被拒：{}",
             reply.status
         );
@@ -417,13 +526,13 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
     ] {
         let reply = request(port, method, path, Some(&admin), body).await;
         assert!(
-            reply.status != 401 && reply.status != 403,
+            !matches!(reply.status, 401 | 403 | 404 | 405),
             "超管访问 {method} {path} 被拒：{}",
             reply.status
         );
     }
     for (method, path) in [
-        ("POST", "/v1/relay/cluster/v1/history"),
+        ("POST", "/v1/relay/cluster/v1/history/clean"),
         ("GET", "/v1/relay/update/check"),
     ] {
         let reply = request(port, method, path, Some(&admin), "").await;
@@ -434,9 +543,17 @@ async fn relay_routes_enforce_the_three_role_matrix_and_the_restore_body_limit()
         "{{\"password\":\"boss-password\",\"backup_base64\":\"{}\"}}",
         "A".repeat(3 * 1024 * 1024)
     );
-    let restore = post_status(port, "/v1/relay/storage/restore", &admin, &oversized).await;
+    let restore = oversized_status(port, "/v1/relay/storage/restore", &admin, &oversized).await;
     assert_ne!(restore, 413, "存储恢复必须放行 48MiB 以内的请求体");
-    let rejected = post_status(port, "/v1/relay/config", &admin, &oversized).await;
+    // 只比默认上限多一个字节：服务端会把整个请求体读掉才报 413，关连接时它的
+    // 接收缓冲区是空的，于是正常 FIN 而不会用 RST 把 413 打掉。多送 1MiB 时
+    // 剩余字节会让服务端以 RST 收场，响应可能被内核丢掉（r1 放行失败就是这个）。
+    let mut over_limit = format!(
+        "{{\"password\":\"boss-password\",\"backup_base64\":\"{}\"}}",
+        "A".repeat(2 * 1024 * 1024)
+    );
+    over_limit.truncate(2 * 1024 * 1024 + 1);
+    let rejected = oversized_status(port, "/v1/relay/config", &admin, &over_limit).await;
     assert_eq!(rejected, 413, "其它路由不得跟着放宽 body limit");
 
     stop_and_assert_released(port, stop, task).await;
@@ -448,7 +565,7 @@ async fn relay_events_stream_ends_when_the_session_is_revoked() {
     let _serial = SERIAL.lock().await;
     let logging = init_tracing_with("info", false);
     let key_dir = tempfile::tempdir().unwrap();
-    let _key_env = KeyFileEnv::set(&key_dir.path().join("master.key"));
+    let _key_env = EnvVarGuard::set("BILISTREAM_KEY_FILE", key_dir.path().join("master.key"));
     let work_dir = tempfile::tempdir().unwrap();
     let (port, stop, task) = spawn_server(true, work_dir.path(), &logging);
     wait_for_answer(port).await;
@@ -457,7 +574,7 @@ async fn relay_events_stream_ends_when_the_session_is_revoked() {
     let viewer = login(port, "ro", "ro-password").await;
 
     // 生产用 30 秒复查；这里把 SSE 会话复查压到 100ms，才可能在秒级断言断流。
-    unsafe { std::env::set_var("BILISTREAM_SSE_RECHECK_MS", "100") };
+    let _sse_env = EnvVarGuard::set("BILISTREAM_SSE_RECHECK_MS", "100");
     let (head, mut stream) = open_sse(port, &viewer).await;
     let lowered = head.to_lowercase();
     assert!(lowered.contains(" 200 "), "SSE 建流失败：{head}");
@@ -480,8 +597,6 @@ async fn relay_events_stream_ends_when_the_session_is_revoked() {
         stream_closed(&mut stream, Duration::from_secs(2)).await,
         "会话撤销后 SSE 必须在一个复查周期内干净结束"
     );
-    unsafe { std::env::remove_var("BILISTREAM_SSE_RECHECK_MS") };
-
     stop_and_assert_released(port, stop, task).await;
 }
 
@@ -490,7 +605,7 @@ async fn websub_callback_is_mounted_outside_the_login_guard() {
     let _serial = SERIAL.lock().await;
     let logging = init_tracing_with("info", false);
     let key_dir = tempfile::tempdir().unwrap();
-    let _key_env = KeyFileEnv::set(&key_dir.path().join("master.key"));
+    let _key_env = EnvVarGuard::set("BILISTREAM_KEY_FILE", key_dir.path().join("master.key"));
     let work_dir = tempfile::tempdir().unwrap();
     let (port, stop, task) = spawn_server(true, work_dir.path(), &logging);
     wait_for_answer(port).await;
@@ -507,10 +622,11 @@ async fn websub_callback_is_mounted_outside_the_login_guard() {
     assert_eq!(verify.status, 404, "没有待验证订阅时由 WebSub 自己拒绝");
 
     // 超过 WebSub 自己的 256KiB 上限：登录墙会先回 401，走到处理器才会是 413。
-    let oversized_push = "x".repeat(300 * 1024);
-    let limited = request(port, "POST", "/v1/relay/websub/youtube", None, &oversized_push).await;
+    // 与 2MiB 用例同理：只超出 256KiB 上限一个字节，服务端读干净再回 413。
+    let oversized_push = "x".repeat(256 * 1024 + 1);
+    let limited = oversized_status(port, "/v1/relay/websub/youtube", "", &oversized_push).await;
     assert_eq!(
-        limited.status, 413,
+        limited, 413,
         "请求必须到 WebSub 处理器（它自己的 256KiB 上限），而不是被登录墙拦下"
     );
 

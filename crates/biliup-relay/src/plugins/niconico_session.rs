@@ -1,8 +1,8 @@
-#![allow(dead_code)]
 //! Read-only session validity warnings; this never renews or replaces a cookie.
 use crate::config::Config;
 use serde::Serialize;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -206,14 +206,23 @@ pub(crate) async fn check(cfg: &Config, force: bool) -> SessionStatus {
     status
 }
 
+static SESSION_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+
 pub struct SessionWorker(tokio::task::JoinHandle<()>);
+
 impl Drop for SessionWorker {
     fn drop(&mut self) {
         self.0.abort();
+        SESSION_WORKER_STARTED.store(false, Ordering::SeqCst);
     }
 }
-pub fn start_session_worker() -> SessionWorker {
-    SessionWorker(tokio::spawn(async {
+
+/// 与其余 7 个 worker 一致的单例守卫：同进程只允许一个会话检查循环。
+pub fn start_session_worker() -> Option<SessionWorker> {
+    if SESSION_WORKER_STARTED.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    Some(SessionWorker(tokio::spawn(async {
         loop {
             let cfg = crate::config::load_config().await.ok();
             if let Some(cfg) = cfg.filter(|cfg| cfg.niconico.session_check_enabled) {
@@ -221,7 +230,7 @@ pub fn start_session_worker() -> SessionWorker {
             }
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
-    }))
+    })))
 }
 
 #[cfg(test)]

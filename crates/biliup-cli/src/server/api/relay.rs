@@ -248,16 +248,25 @@ async fn events(caller: Caller, auth_session: AuthSession, headers: HeaderMap) -
     .into_response()
 }
 
-/// 会话撤销等待端：宿主的 `Caller::revoked()` 与一次更快的复查并联，先到者结束流。
+/// 会话撤销等待端。
+///
+/// 默认只等宿主的会话通道（access 里 30 秒一次的复查），不额外起第二条轮询；
+/// 只有显式配了更短的复查间隔，才并联一次 watch_session，先到者结束流。
 fn session_revocation(caller: Caller, auth_session: AuthSession) -> BoxFuture<'static, ()> {
     let host = caller.revoked();
+    // --auth 关闭时是零鉴权超管：旧 cookie 没有意义，更不能让它断流。
+    if !caller.subject.auth_enabled {
+        return host;
+    }
     let Some(user) = auth_session.user else {
+        return host;
+    };
+    let Some(interval) = sse_recheck_override() else {
         return host;
     };
     let backend = auth_session.backend;
     let user_id = user.id;
     let auth_hash = user.session_auth_hash().to_vec();
-    let interval = sse_recheck_interval();
     Box::pin(async move {
         tokio::select! {
             _ = host => {}
@@ -280,12 +289,17 @@ async fn watch_session(backend: Backend, user_id: i64, auth_hash: Vec<u8>, inter
     }
 }
 
-/// 默认与宿主长连接复查同频；集成测试用 `BILISTREAM_SSE_RECHECK_MS` 把它压到毫秒级。
-fn sse_recheck_interval() -> Duration {
-    std::env::var("BILISTREAM_SSE_RECHECK_MS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(crate::server::api::access::RECHECK_INTERVAL)
+/// 更短的会话复查间隔：只在显式设置 `BILISTREAM_SSE_RECHECK_MS` 时生效。
+///
+/// 下限 100ms：再快就是紧循环狂查数据库；上限 30s：再慢不比宿主自己的复查快，
+/// 没有意义。区间外一律忽略，回落默认（只走宿主的会话通道）。
+fn sse_recheck_override() -> Option<Duration> {
+    let millis = std::env::var("BILISTREAM_SSE_RECHECK_MS")
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    (100..=30_000)
+        .contains(&millis)
+        .then(|| Duration::from_millis(millis))
 }

@@ -168,7 +168,7 @@ struct Workers {
     discovery: Option<plugins::youtube_discovery::DiscoveryWorker>,
     youtube_index: Option<plugins::youtube_index::StoreRefreshWorker>,
     twitch_live: Option<plugins::twitch_live::TwitchLiveWorker>,
-    niconico_session: plugins::niconico_session::SessionWorker,
+    niconico_session: Option<plugins::niconico_session::SessionWorker>,
     niconico_live: Option<plugins::niconico_live::NiconicoLiveWorker>,
     websub: Option<plugins::youtube_websub::WebSubWorker>,
 }
@@ -406,7 +406,9 @@ impl RelayService {
     /// 避免同进程里误停不是自己发起的引擎。
     pub async fn shutdown(&self) {
         // 后台 worker 先退出：之后的统计库与存储关停不得与运行中的任务相撞。
-        if let Some(workers) = lock(&self.inner).workers.take() {
+        // 句柄在锁内取出、在锁外释放，停机期间不占着 inner 的互斥量。
+        let workers = { lock(&self.inner).workers.take() };
+        if let Some(workers) = workers {
             workers.stop();
         }
         let (outcome, stopped_epoch) = self.stop_monitor_loop_inner(MONITOR_STOP_TIMEOUT).await;

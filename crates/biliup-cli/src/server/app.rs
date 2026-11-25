@@ -77,13 +77,15 @@ impl ApplicationController {
 
         // 构建应用程序路由
         // 是否启用登录保护
-        let mut protected_routes = server::router::router(service_register.clone())
-            .route("/v1/ws/logs", get(ws_logs))
-            .merge(server::api::relay::router(service_register.clone()));
+        let mut protected_routes =
+            server::router::router(service_register.clone()).route("/v1/ws/logs", get(ws_logs));
         if let Some(fleet_routes) = fleet.router() {
             protected_routes = protected_routes.merge(fleet_routes);
         }
         protected_routes = fleet.guard(protected_routes);
+        // relay 路由只穿过访问控制层：形式上不经过 fleet 的中间件栈。
+        let protected_routes =
+            protected_routes.merge(server::api::relay::router(service_register.clone()));
         let mut app = with_optional_auth(protected_routes, enable_login_guard);
         app = app
             .merge(server::api::relay::websub_router())
@@ -94,6 +96,8 @@ impl ApplicationController {
 
         // 启动HTTP服务器
         let addr = listener.local_addr().change_context(AppError::Unknown)?;
+        // WebSub 的回调监听要避开面板端口，先把真实端口登记进去。
+        biliup_relay::plugins::youtube_websub::set_webui_port(addr.port());
         info!("routes initialized, listening on {}", addr);
 
         axum::serve(
