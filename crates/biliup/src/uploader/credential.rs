@@ -10,6 +10,7 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use crate::error::{Kind, Result};
 use crate::uploader::bilibili::{BiliBili, ResponseData};
 use base64::{Engine as _, engine::general_purpose};
+use biliup_accounts::Cipher;
 use cookie::Cookie;
 use md5::{Digest, Md5};
 use reqwest::header::{COOKIE, ORIGIN, REFERER, USER_AGENT};
@@ -58,9 +59,30 @@ impl AppKeyStore {
 }
 
 pub fn bilibili_from_cookies(file: impl AsRef<Path>, proxy: Option<&str>) -> Result<BiliBili> {
-    let file = std::fs::File::options().read(true).open(file)?;
-    let login_info: LoginInfo = serde_json::from_reader(std::io::BufReader::new(&file))?;
+    let login_info = read_login_info(file.as_ref())?;
     bilibili_from_info(login_info, proxy)
+}
+
+fn is_encrypted_path(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("enc")
+}
+
+fn configured_cipher() -> Result<Cipher> {
+    Cipher::from_env()?.ok_or_else(|| {
+        Kind::Custom("凭据密钥未配置：请设置 BILIUP_ACCOUNT_KEY_FILE 指向密钥文件".into())
+    })
+}
+
+fn read_login_info(path: &Path) -> Result<LoginInfo> {
+    let bytes = std::fs::read(path)?;
+    let plaintext = if biliup_accounts::is_ciphertext(&bytes) {
+        configured_cipher()?
+            .open(&bytes)
+            .map_err(|error| Kind::Custom(error.to_string()))?
+    } else {
+        bytes
+    };
+    Ok(serde_json::from_slice(&plaintext)?)
 }
 
 static CREDENTIAL_FILE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> =
@@ -160,6 +182,19 @@ pub async fn lock_credential_file(path: impl AsRef<Path>) -> std::io::Result<Own
 }
 
 fn write_login_info_unlocked(path: &Path, login_info: &LoginInfo) -> Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(login_info)?;
+    bytes.push(b'\n');
+    let bytes = if is_encrypted_path(path) {
+        configured_cipher()?
+            .seal(&bytes)
+            .map_err(|error| Kind::Custom(error.to_string()))?
+    } else {
+        bytes
+    };
+    write_bytes_unlocked(path, &bytes)
+}
+
+fn write_bytes_unlocked(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
@@ -191,8 +226,7 @@ fn write_login_info_unlocked(path: &Path, login_info: &LoginInfo) -> Result<()> 
     }
 
     let write_result = (|| -> Result<()> {
-        serde_json::to_writer_pretty(&mut temporary_file, login_info)?;
-        temporary_file.write_all(b"\n")?;
+        temporary_file.write_all(bytes)?;
         temporary_file.sync_all()?;
         replace_credential_file(&temporary_path, path)?;
         Ok(())
@@ -215,8 +249,7 @@ pub async fn save_login_info(path: impl AsRef<Path>, login_info: &LoginInfo) -> 
 pub async fn renew_login_info_file(path: impl AsRef<Path>, proxy: Option<&str>) -> Result<()> {
     let path = normalize_credential_path(path)?;
     let _guard = lock_credential_file(&path).await?;
-    let file = std::fs::File::options().read(true).open(&path)?;
-    let login_info: LoginInfo = serde_json::from_reader(std::io::BufReader::new(file))?;
+    let login_info = read_login_info(&path)?;
     let new_info = Credential::new(proxy).renew_tokens(login_info).await?;
     write_login_info_unlocked(&path, &new_info)
 }
@@ -234,15 +267,13 @@ pub fn bilibili_from_info(login_info: LoginInfo, proxy: Option<&str>) -> Result<
 pub async fn login_by_cookies(file: impl AsRef<Path>, proxy: Option<&str>) -> Result<BiliBili> {
     let path = normalize_credential_path(file)?;
     let _guard = lock_credential_file(&path).await?;
-    let file = std::fs::File::options().read(true).open(&path)?;
-    let login_info: LoginInfo = serde_json::from_reader(std::io::BufReader::new(&file))?;
+    let login_info = read_login_info(&path)?;
 
     let client: Credential = Credential::new(proxy);
     let need_refresh = client.validate_tokens(&login_info).await?;
 
     if need_refresh {
         let new_info = client.renew_tokens(login_info).await?;
-        drop(file);
         write_login_info_unlocked(&path, &new_info)?;
         bilibili_from_info(new_info, proxy)
     } else {
@@ -498,6 +529,174 @@ mod redaction_tests {
         let saved: LoginInfo =
             serde_json::from_reader(std::fs::File::open(target).unwrap()).unwrap();
         assert_eq!(saved.token_info.access_token, "after");
+    }
+}
+
+#[cfg(test)]
+mod encrypted_credential_tests {
+    use super::{
+        LoginInfo, TokenInfo, read_login_info, save_login_info, write_login_info_unlocked,
+    };
+    use biliup_accounts::KEY_FILE_ENV;
+    use serde_json::json;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static KEY_ENV: Mutex<()> = Mutex::new(());
+
+    const DAMAGED: &str = "密钥不匹配或加密数据已损坏";
+    const MISSING_KEY: &str = "密钥未配置";
+
+    fn login_info(token: &str) -> LoginInfo {
+        LoginInfo {
+            cookie_info: json!({"cookies": [{"name": "SESSDATA", "value": token}]}),
+            sso: vec!["example.com".into()],
+            token_info: TokenInfo {
+                access_token: token.into(),
+                expires_in: 3600,
+                mid: 42,
+                refresh_token: token.into(),
+            },
+            platform: Some("Android".into()),
+        }
+    }
+
+    fn write_key(dir: &Path, fill: u8) -> PathBuf {
+        let path = dir.join("accounts.key");
+        std::fs::write(&path, format!("{}\n", format!("{fill:02x}").repeat(32))).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path
+    }
+
+    fn set_key(path: &Path) {
+        unsafe { std::env::set_var(KEY_FILE_ENV, path) }
+    }
+
+    fn clear_key() {
+        unsafe { std::env::remove_var(KEY_FILE_ENV) }
+    }
+
+    #[cfg(unix)]
+    fn assert_private(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(not(unix))]
+    fn assert_private(_path: &Path) {}
+
+    #[tokio::test]
+    async fn plaintext_files_keep_the_legacy_format() {
+        let _guard = KEY_ENV.lock().unwrap_or_else(|error| error.into_inner());
+        clear_key();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cookies.json");
+
+        save_login_info(&path, &login_info("plain-secret")).await.unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert!(raw.starts_with(b"{"));
+        assert!(!biliup_accounts::is_ciphertext(&raw));
+        assert_private(&path);
+
+        let loaded = read_login_info(&path).unwrap();
+        assert_eq!(loaded.token_info.access_token, "plain-secret");
+
+        let legacy = dir.path().join("legacy.json");
+        std::fs::write(
+            &legacy,
+            serde_json::to_vec_pretty(&login_info("legacy-secret")).unwrap(),
+        )
+        .unwrap();
+        let loaded = read_login_info(&legacy).unwrap();
+        assert_eq!(loaded.token_info.access_token, "legacy-secret");
+        assert_eq!(loaded.token_info.mid, 42);
+    }
+
+    #[tokio::test]
+    async fn encrypted_files_round_trip_through_the_key_env() {
+        let _guard = KEY_ENV.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = TempDir::new().unwrap();
+        set_key(&write_key(dir.path(), 0x11));
+        let path = dir.path().join("cookies.json.enc");
+
+        save_login_info(&path, &login_info("enc-secret")).await.unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[..7], b"BUPACC1");
+        assert!(!String::from_utf8_lossy(&raw).contains("enc-secret"));
+        assert_private(&path);
+
+        let loaded = read_login_info(&path).unwrap();
+        assert_eq!(loaded.token_info.access_token, "enc-secret");
+        assert_eq!(loaded.token_info.mid, 42);
+
+        write_login_info_unlocked(&path, &loaded).unwrap();
+        let rewritten = std::fs::read(&path).unwrap();
+        assert!(biliup_accounts::is_ciphertext(&rewritten));
+        assert_eq!(
+            read_login_info(&path).unwrap().token_info.access_token,
+            "enc-secret"
+        );
+        clear_key();
+    }
+
+    #[tokio::test]
+    async fn wrong_key_and_tampered_ciphertext_are_rejected() {
+        let _guard = KEY_ENV.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = TempDir::new().unwrap();
+        let well = dir.path().join("well");
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&well).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        set_key(&write_key(&well, 0x22));
+        let path = well.join("cookies.json.enc");
+        save_login_info(&path, &login_info("guarded-secret")).await.unwrap();
+
+        set_key(&write_key(&other, 0x33));
+        let error = read_login_info(&path).unwrap_err().to_string();
+        assert!(error.contains(DAMAGED), "{error}");
+        assert!(!error.contains("guarded-secret"));
+
+        set_key(&well.join("accounts.key"));
+        let mut raw = std::fs::read(&path).unwrap();
+        let last = raw.len() - 1;
+        raw[last] ^= 0x01;
+        std::fs::write(&path, &raw).unwrap();
+        let error = read_login_info(&path).unwrap_err().to_string();
+        assert!(error.contains(DAMAGED), "{error}");
+        assert!(!error.contains("guarded-secret"));
+        clear_key();
+    }
+
+    #[tokio::test]
+    async fn encrypted_files_without_a_key_report_the_missing_setting() {
+        let _guard = KEY_ENV.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = TempDir::new().unwrap();
+        set_key(&write_key(dir.path(), 0x44));
+        let path = dir.path().join("cookies.json.enc");
+        save_login_info(&path, &login_info("unconfigured-secret"))
+            .await
+            .unwrap();
+
+        clear_key();
+        let error = read_login_info(&path).unwrap_err().to_string();
+        assert!(error.contains(MISSING_KEY), "{error}");
+        assert!(!error.contains("unconfigured-secret"));
+
+        let fresh = dir.path().join("fresh.json.enc");
+        let error = save_login_info(&fresh, &login_info("fresh-secret"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(MISSING_KEY), "{error}");
+        assert!(!fresh.exists());
     }
 }
 

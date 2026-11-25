@@ -1,9 +1,14 @@
 use crate::AccountError;
 use ring::aead;
-use std::io;
+use std::fs;
+use std::io::{self, Read};
+use std::path::Path;
 use zeroize::Zeroize;
 
 pub const KEY_FILE_ENV: &str = "BILIUP_ACCOUNT_KEY_FILE";
+
+const KEY_TEXT_LEN: usize = 64;
+const KEY_FILE_MAX_BYTES: u64 = 4096;
 
 pub(crate) const MAGIC: &[u8; 7] = b"BUPACC1";
 pub(crate) const NONCE_LEN: usize = 12;
@@ -11,6 +16,48 @@ pub(crate) const TAG_LEN: usize = 16;
 pub(crate) const HEADER_LEN: usize = MAGIC.len() + NONCE_LEN;
 
 const AAD: &[u8] = b"biliup-accounts/v1";
+
+pub struct Cipher {
+    key: Key,
+}
+
+impl Cipher {
+    pub fn from_key_file(path: &Path) -> io::Result<Self> {
+        read_key(path).map(|key| Self { key })
+    }
+
+    pub fn from_env() -> io::Result<Option<Self>> {
+        match std::env::var_os(KEY_FILE_ENV) {
+            Some(path) => Ok(Some(Self::from_key_file(Path::new(&path))?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn seal(&self, plaintext: &[u8]) -> io::Result<Vec<u8>> {
+        seal(&self.key, plaintext)
+    }
+
+    pub fn open(&self, ciphertext: &[u8]) -> io::Result<Vec<u8>> {
+        open(&self.key, ciphertext)
+    }
+
+    pub(crate) fn from_key(key: Key) -> Self {
+        Self { key }
+    }
+
+    pub(crate) fn new_random() -> io::Result<Self> {
+        let raw = random::<32>()?;
+        Ok(Self::from_key(Key::from_bytes(raw)))
+    }
+
+    pub(crate) fn key_text(&self) -> String {
+        format!("{}\n", hex(&self.key.0))
+    }
+}
+
+pub fn is_ciphertext(bytes: &[u8]) -> bool {
+    bytes.starts_with(MAGIC)
+}
 
 pub(crate) struct Key([u8; 32]);
 
@@ -55,6 +102,40 @@ pub(crate) fn unhex(text: &str) -> Option<[u8; 32]> {
         *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
     }
     Some(out)
+}
+
+fn read_key(path: &Path) -> io::Result<Key> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(AccountError::MissingKey.into_io());
+        }
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(AccountError::InvalidKey.into_io());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(AccountError::InsecureKeyPermissions.into_io());
+        }
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(KEY_FILE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > KEY_FILE_MAX_BYTES {
+        return Err(AccountError::InvalidKey.into_io());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| AccountError::InvalidKey.into_io())?;
+    let trimmed = text.trim();
+    if trimmed.len() != KEY_TEXT_LEN {
+        return Err(AccountError::InvalidKey.into_io());
+    }
+    let raw = unhex(trimmed).ok_or_else(|| AccountError::InvalidKey.into_io())?;
+    Ok(Key::from_bytes(raw))
 }
 
 pub(crate) fn seal(key: &Key, plaintext: &[u8]) -> io::Result<Vec<u8>> {

@@ -3,7 +3,7 @@ mod store;
 
 use std::io;
 
-pub use crypto::KEY_FILE_ENV;
+pub use crypto::{Cipher, KEY_FILE_ENV, is_ciphertext};
 pub use store::{AccountStore, MigratedAccount};
 
 #[derive(Debug, thiserror::Error)]

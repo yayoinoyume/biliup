@@ -1,20 +1,19 @@
 use crate::AccountError;
-use crate::crypto::{self, KEY_FILE_ENV, Key};
+use crate::crypto::{self, Cipher, KEY_FILE_ENV};
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-const KEY_TEXT_LEN: usize = 64;
 const MAX_ACCOUNT_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct AccountStore {
     data_dir: PathBuf,
     accounts: PathBuf,
-    key: Key,
+    key: Cipher,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +48,7 @@ impl AccountStore {
         let plaintext = Zeroizing::new(
             serde_json::to_vec(value).map_err(|error| AccountError::Serialize(error).into_io())?,
         );
-        let sealed = crypto::seal(&self.key, &plaintext)?;
+        let sealed = self.key.seal(&plaintext)?;
         let dest = self.path_for(mid);
         write_atomic(&dest, &sealed)?;
         Ok(dest)
@@ -57,7 +56,7 @@ impl AccountStore {
 
     pub fn load(&self, mid: u64) -> io::Result<Value> {
         let sealed = read_limited(&self.path_for(mid))?;
-        let plaintext = Zeroizing::new(crypto::open(&self.key, &sealed)?);
+        let plaintext = Zeroizing::new(self.key.open(&sealed)?);
         serde_json::from_slice(&plaintext).map_err(|error| AccountError::Serialize(error).into_io())
     }
 
@@ -131,39 +130,18 @@ fn resolve_key_path(data_dir: &Path, key_path: Option<&Path>) -> io::Result<Path
     std::path::absolute(data_dir.join("accounts.key"))
 }
 
-fn load_key(path: &Path) -> io::Result<Key> {
-    if !path.try_exists()? {
-        let parent = path
-            .parent()
-            .ok_or_else(|| AccountError::InvalidKey.into_io())?;
-        private_dir(parent)?;
-        let mut raw = crypto::random::<32>()?;
-        let encoded = Zeroizing::new(format!("{}\n", crypto::hex(&raw)));
-        let key = Key::from_bytes(raw);
-        raw.zeroize();
-        write_new_private(path, encoded.as_bytes())?;
-        return Ok(key);
+fn load_key(path: &Path) -> io::Result<Cipher> {
+    if path.try_exists()? {
+        return Cipher::from_key_file(path);
     }
-
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(AccountError::InvalidKey.into_io());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(AccountError::InsecureKeyPermissions.into_io());
-        }
-    }
-    let bytes = read_limited(path)?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| AccountError::InvalidKey.into_io())?;
-    let trimmed = text.trim();
-    if trimmed.len() != KEY_TEXT_LEN {
-        return Err(AccountError::InvalidKey.into_io());
-    }
-    let raw = crypto::unhex(trimmed).ok_or_else(|| AccountError::InvalidKey.into_io())?;
-    Ok(Key::from_bytes(raw))
+    let parent = path
+        .parent()
+        .ok_or_else(|| AccountError::InvalidKey.into_io())?;
+    private_dir(parent)?;
+    let cipher = Cipher::new_random()?;
+    let encoded = Zeroizing::new(cipher.key_text());
+    write_new_private(path, encoded.as_bytes())?;
+    Ok(cipher)
 }
 
 fn private_dir(path: &Path) -> io::Result<()> {
