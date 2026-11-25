@@ -1,172 +1,182 @@
 'use client'
 
-/**
- * 转播总览（`/relay`）：Phase 3 的入口骨架。
- *
- * 这里只挂轻量只读的 `/v1/relay/health`、`/v1/relay/version`、`/v1/relay/status`、
- * `/v1/relay/deps/status`，用来验证「前端 → 宿主 → 转播底座」这条链路是通的；
- * 控制台与实时曲线由 P3-03 接管本文件正文。
- */
-
-import { Tag, Typography } from '@douyinfe/semi-ui'
-import { IconRadio } from '@douyinfe/semi-icons'
-import useSWR from 'swr'
+import { Banner, Button, Tag, Toast, Typography } from '@douyinfe/semi-ui'
+import { IconLink, IconRadio } from '@douyinfe/semi-icons'
+import { useState } from 'react'
+import Link from 'next/link'
+import useSWR, { useSWRConfig } from 'swr'
 import PageHeader from '../components/PageHeader'
 import PermissionGate from '@/app/ui/relay/PermissionGate'
-import RelayError from '@/app/ui/relay/RelayError'
-import {
-  relayDepsStatus,
-  relayHealth,
-  relayStatus,
-  relayVersion,
-} from '@/app/lib/relay'
+import RelayError, { relayErrorMessage } from '@/app/ui/relay/RelayError'
+import { useMe } from '@/app/lib/use-me'
+import { relaySetupStatus, relayStartStream, relayStatus } from '@/app/lib/relay'
+import { useRelayEvents, type RelayConnectionState } from '@/app/lib/relay-events'
+import StatusCards from './components/StatusCards'
+import PriorityCard from './components/PriorityCard'
+import NetworkPanel from './components/NetworkPanel'
+import StreamList from './components/StreamList'
+import FaceAuthModal from './components/FaceAuthModal'
+import HolodexLoginModal from './components/HolodexLoginModal'
+import { RELAY_EVENT_KEYS, RELAY_SETUP_KEY, RELAY_STATUS_KEY } from './components/keys'
+import pageStyles from './components/relay-overview.module.scss'
 import styles from '@/app/ui/relay/relay.module.scss'
 
-const { Text, Title } = Typography
+const { Text } = Typography
 
-function StatusDot({ online }: { online: boolean }) {
-  return <span className={`${styles.statusDot} ${online ? styles.online : styles.offline}`} />
+const CONNECTION_LABELS: Record<
+  RelayConnectionState,
+  { label: string; color: 'green' | 'orange' | 'red' }
+> = {
+  connecting: { label: '实时连接中', color: 'orange' },
+  open: { label: '实时已连接', color: 'green' },
+  reconnecting: { label: '实时重连中', color: 'orange' },
+  offline: { label: '实时已断开', color: 'red' },
 }
 
 export default function RelayOverviewPage() {
-  const health = useSWR('relay:health', relayHealth)
-  const version = useSWR('relay:version', relayVersion)
-  const status = useSWR('relay:status', relayStatus)
-  const deps = useSWR('relay:deps', relayDepsStatus, { revalidateOnFocus: false })
+  const { can } = useMe()
+  const { mutate } = useSWRConfig()
+  const [connection, setConnection] = useState<RelayConnectionState>('connecting')
+  const [faceAuth, setFaceAuth] = useState<{ qrUrl: string | null; message: string } | null>(null)
+  const [checkingFaceAuth, setCheckingFaceAuth] = useState(false)
+  const [holodexOpen, setHolodexOpen] = useState(false)
+  const status = useSWR(RELAY_STATUS_KEY, relayStatus)
+  const setup = useSWR(RELAY_SETUP_KEY, relaySetupStatus, { revalidateOnFocus: false })
+  const canControl = can('relay.control')
+  const canConfig = can('relay.config')
 
-  const snapshot = status.data
-  const platforms = [
-    { key: 'youtube', label: 'YouTube', data: snapshot?.youtube ?? null },
-    { key: 'twitch', label: 'Twitch', data: snapshot?.twitch ?? null },
-    { key: 'niconico', label: 'Niconico', data: snapshot?.niconico ?? null },
-  ]
+  useRelayEvents({
+    enabled: can('relay.view'),
+    onEvent: (event) => {
+      for (const key of RELAY_EVENT_KEYS[event.kind]) void mutate(key)
+    },
+    onConnectionChange: setConnection,
+  })
+
+  const refreshStatus = () => {
+    void status.mutate()
+  }
+
+  const retryFaceAuth = async () => {
+    if (checkingFaceAuth) return
+    setCheckingFaceAuth(true)
+    try {
+      const outcome = await relayStartStream()
+      if (outcome.ok) {
+        Toast.success(outcome.message ?? '直播已开始')
+        setFaceAuth(null)
+        refreshStatus()
+      } else if (outcome.faceAuth) {
+        setFaceAuth({ qrUrl: outcome.faceAuth.qrUrl, message: outcome.message })
+      } else {
+        Toast.error(outcome.message)
+        setFaceAuth(null)
+      }
+    } catch (error) {
+      Toast.error(relayErrorMessage(error))
+    } finally {
+      setCheckingFaceAuth(false)
+    }
+  }
 
   return (
     <div className={styles.content}>
       <PageHeader
         title="转播总览"
-        description="转播底座健康状况、直播状态与推流依赖"
+        description="实时直播状态、优先频道、推流指标与 Holodex 直播预告"
         icon={<IconRadio />}
+        actions={
+          can('relay.view') ? (
+            <div className={styles.toolbar}>
+              <Tag size="small" color={CONNECTION_LABELS[connection].color}>
+                {CONNECTION_LABELS[connection].label}
+              </Tag>
+              <Button
+                size="small"
+                theme="light"
+                icon={<IconLink />}
+                onClick={() => setHolodexOpen(true)}
+              >
+                Holodex 状态
+              </Button>
+            </div>
+          ) : undefined
+        }
       />
 
       <PermissionGate perm="relay.view">
-        <div className={styles.grid}>
-          <section className={styles.card}>
-            <div className={styles.sectionTitle}>
-              <Title heading={6} style={{ margin: 0 }}>
-                转播底座
-              </Title>
-              {version.data ? <Tag size="small">v{version.data}</Tag> : null}
-            </div>
-            {health.error ? (
-              <RelayError
-                error={health.error}
-                title="底座不可达"
-                onRetry={() => {
-                  void health.mutate()
-                }}
-              />
-            ) : (
-              <dl className={styles.kv}>
-                <dt className={styles.kvKey}>运行状态</dt>
-                <dd className={styles.kvValue}>
-                  <StatusDot online={health.data?.enabled === true} />{' '}
-                  {health.isLoading ? '读取中…' : health.data?.state ?? '未知'}
-                </dd>
-                <dt className={styles.kvKey}>存储就绪</dt>
-                <dd className={styles.kvValue}>{health.data?.storage_ready ? '是' : '否'}</dd>
-                <dt className={styles.kvKey}>SQLite 驱动</dt>
-                <dd className={`${styles.kvValue} ${styles.mono}`}>{health.data?.sqlite_driver ?? '—'}</dd>
-                <dt className={styles.kvKey}>数据目录</dt>
-                <dd className={`${styles.kvValue} ${styles.mono}`}>{health.data?.data_dir ?? '—'}</dd>
-              </dl>
-            )}
-          </section>
-
-          <section className={styles.card}>
-            <div className={styles.sectionTitle}>
-              <Title heading={6} style={{ margin: 0 }}>
-                推流依赖
-              </Title>
-              <Tag size="small" color={deps.data?.ready ? 'green' : 'orange'}>
-                {deps.data?.ready ? '可用' : '待补'}
-              </Tag>
-            </div>
-            <dl className={styles.kv}>
-              <dt className={styles.kvKey}>ffmpeg</dt>
-              <dd className={styles.kvValue}>{deps.data?.ffmpeg ? '已安装' : '未检测到'}</dd>
-              <dt className={styles.kvKey}>yt-dlp</dt>
-              <dd className={styles.kvValue}>{deps.data?.yt_dlp ? '已安装' : '未检测到'}</dd>
-              <dt className={styles.kvKey}>streamlink</dt>
-              <dd className={styles.kvValue}>{deps.data?.streamlink ? '已安装' : '未检测到'}</dd>
-            </dl>
-            <Text type="tertiary" size="small">
-              yt-dlp 与 streamlink 至少有其一即可开播。
-            </Text>
-          </section>
-        </div>
-
-        <section className={styles.card}>
-          <div className={styles.sectionTitle}>
-            <Title heading={6} style={{ margin: 0 }}>
-              B 站直播间
-            </Title>
-            {snapshot ? (
-              <Tag size="small" color={snapshot.bilibili.is_live ? 'green' : 'grey'}>
-                {snapshot.bilibili.is_live ? '直播中' : '未开播'}
-              </Tag>
-            ) : null}
-          </div>
-          {status.error ? (
-            <RelayError
-              error={status.error}
-              onRetry={() => {
-                void status.mutate()
-              }}
+        {setup.data?.needs_setup ? (
+          canConfig ? (
+            <Banner
+              type="warning"
+              closeIcon={null}
+              title="首次配置还没有完成"
+              description={
+                <div className={styles.errorBody}>
+                  <Text>
+                    缺少：{setup.data.missing_files.join('、') || '配置文件'}。完成扫码登录与基础参数后即可开播。
+                  </Text>
+                  <div className={styles.errorActions}>
+                    <Link href="/relay/setup" className={pageStyles.textLink}>
+                      打开首次配置向导
+                    </Link>
+                  </div>
+                </div>
+              }
             />
           ) : (
-            <dl className={styles.kv}>
-              <dt className={styles.kvKey}>房间号</dt>
-              <dd className={`${styles.kvValue} ${styles.mono}`}>{snapshot?.bilibili.room || '—'}</dd>
-              <dt className={styles.kvKey}>标题</dt>
-              <dd className={styles.kvValue}>{snapshot?.bilibili.title || '—'}</dd>
-              <dt className={styles.kvKey}>分区</dt>
-              <dd className={styles.kvValue}>{snapshot?.bilibili.area_name || '—'}</dd>
-              <dt className={styles.kvKey}>在线人气</dt>
-              <dd className={styles.kvValue}>{snapshot?.bilibili.online ?? '—'}</dd>
-            </dl>
-          )}
-        </section>
+            <Banner
+              type="info"
+              closeIcon={null}
+              title="转播底座尚未初始化"
+              description="请联系管理员完成首次配置；首次配置需要「修改转播配置」权限。"
+            />
+          )
+        ) : null}
+        {setup.data?.storage_error ? (
+          <Banner type="danger" closeIcon={null} title="数据存储不可用" description={setup.data.storage_error} />
+        ) : null}
+        {setup.error ? (
+          <RelayError
+            error={setup.error}
+            title="引导状态读取失败"
+            onRetry={() => {
+              void setup.mutate()
+            }}
+          />
+        ) : null}
 
-        <div className={styles.grid}>
-          {platforms.map((platform) => (
-            <section key={platform.key} className={styles.card}>
-              <div className={styles.sectionTitle}>
-                <Title heading={6} style={{ margin: 0 }}>
-                  {platform.label}
-                </Title>
-                <Tag size="small" color={platform.data?.is_live ? 'green' : 'grey'}>
-                  {platform.data ? (platform.data.is_live ? '直播中' : '未开播') : '未配置'}
-                </Tag>
-              </div>
-              <dl className={styles.kv}>
-                <dt className={styles.kvKey}>频道</dt>
-                <dd className={styles.kvValue}>{platform.data?.channel_name || '—'}</dd>
-                <dt className={styles.kvKey}>监听</dt>
-                <dd className={styles.kvValue}>
-                  {platform.data ? (platform.data.enable_monitor ? '开启' : '关闭') : '—'}
-                </dd>
-              </dl>
-            </section>
-          ))}
-        </div>
+        <StatusCards
+          data={status.data}
+          error={status.error}
+          loading={status.isLoading}
+          refreshing={status.isValidating}
+          canControl={canControl}
+          onRefresh={refreshStatus}
+          onFaceAuth={(qrUrl, message) => setFaceAuth({ qrUrl, message })}
+        />
 
-        <div className={styles.card}>
-          <Text type="tertiary" size="small">
-            当前为 Phase 3 底座页：频道与分区、转播设置、推流统计、实时日志分别由
-            P3-02 之后的单元接管正文。
-          </Text>
-        </div>
+        <PriorityCard
+          priority={status.data?.priority_channel ?? null}
+          canControl={canControl}
+          canConfig={canConfig}
+          onRefresh={refreshStatus}
+        />
+
+        <NetworkPanel />
+
+        <StreamList canControl={canControl} onRefresh={refreshStatus} />
+
+        <FaceAuthModal
+          visible={faceAuth !== null}
+          qrUrl={faceAuth?.qrUrl ?? null}
+          message={faceAuth?.message ?? ''}
+          checking={checkingFaceAuth}
+          onCheck={() => void retryFaceAuth()}
+          onClose={() => setFaceAuth(null)}
+        />
+
+        <HolodexLoginModal visible={holodexOpen} onClose={() => setHolodexOpen(false)} />
       </PermissionGate>
     </div>
   )
