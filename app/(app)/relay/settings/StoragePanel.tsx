@@ -1,0 +1,234 @@
+'use client'
+
+import { Button, Input, Toast, Typography } from '@douyinfe/semi-ui'
+import { useState, type ChangeEvent } from 'react'
+import useSWR from 'swr'
+import { relayStorageBackup, relayStorageRestore, relayStorageStatus } from '@/app/lib/relay'
+import { RELAY_MAX_RESTORE_BYTES, formatBytes } from '@/app/lib/relay-format'
+import RelayError, { relayErrorMessage } from '@/app/ui/relay/RelayError'
+import relayStyles from '@/app/ui/relay/relay.module.scss'
+import { FormDialog } from '@/app/ui/shell'
+import { SettingsCard, SettingsField } from './shared'
+import styles from './settings.module.scss'
+
+const { Text } = Typography
+
+const MIN_PASSPHRASE = 12
+
+export interface StoragePanelProps {
+  onRestored: () => Promise<unknown>
+}
+
+export default function StoragePanel({ onRestored }: StoragePanelProps) {
+  const storage = useSWR('relay:storage', relayStorageStatus, { revalidateOnFocus: false })
+  const [backupPhrase, setBackupPhrase] = useState('')
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [restorePhrase, setRestorePhrase] = useState('')
+  const [file, setFile] = useState<File | null>(null)
+  const [restoreBusy, setRestoreBusy] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const status = storage.data
+  const ready = status?.ready === true
+  const configured = status?.ready === true ? status.configured : false
+
+  const download = async () => {
+    const phrase = backupPhrase.trim()
+    if (phrase.length < MIN_PASSPHRASE) {
+      Toast.error('备份口令至少 ' + MIN_PASSPHRASE + ' 位')
+      return
+    }
+    setBackupBusy(true)
+    try {
+      const { blob, filename } = await relayStorageBackup(phrase)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setBackupPhrase('')
+      Toast.success('加密备份已开始下载')
+    } catch (error) {
+      Toast.error({ content: relayErrorMessage(error), duration: 6 })
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  const pickFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const next = event.target.files?.[0] ?? null
+    if (next && next.size > RELAY_MAX_RESTORE_BYTES) {
+      Toast.error('备份文件不能超过 ' + formatBytes(RELAY_MAX_RESTORE_BYTES))
+      event.target.value = ''
+      setFile(null)
+      return
+    }
+    setFile(next)
+  }
+
+  const restore = async () => {
+    if (!file) return
+    const phrase = restorePhrase.trim()
+    if (phrase.length < MIN_PASSPHRASE) {
+      Toast.error('恢复口令至少 ' + MIN_PASSPHRASE + ' 位')
+      return
+    }
+    if (file.size > RELAY_MAX_RESTORE_BYTES) {
+      Toast.error('备份文件不能超过 ' + formatBytes(RELAY_MAX_RESTORE_BYTES))
+      return
+    }
+    setRestoreBusy(true)
+    try {
+      const message = await relayStorageRestore(phrase, file)
+      Toast.success({ content: message ?? '备份已恢复', duration: 6 })
+      setConfirmOpen(false)
+      setRestorePhrase('')
+      setFile(null)
+      await storage.mutate()
+      await onRestored()
+    } catch (error) {
+      Toast.error({ content: relayErrorMessage(error), duration: 6 })
+    } finally {
+      setRestoreBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <SettingsCard
+        title="加密存储"
+        description="转播底座的配置、Cookie 与监控数据都存进加密 SQLite；备份是整库导出，恢复会覆盖当前整库。"
+      >
+        {storage.error ? (
+          <RelayError
+            error={storage.error}
+            title="存储状态加载失败"
+            onRetry={() => {
+              void storage.mutate()
+            }}
+          />
+        ) : null}
+
+        {status?.ready === false ? (
+          <Text type="danger" size="small">
+            存储不可用：{status.message}
+          </Text>
+        ) : null}
+
+        <dl className={relayStyles.kv}>
+          <dt className={relayStyles.kvKey}>存储状态</dt>
+          <dd className={relayStyles.kvValue}>{ready ? '已就绪' : '不可用'}</dd>
+          <dt className={relayStyles.kvKey}>结构版本</dt>
+          <dd className={relayStyles.kvValue}>{status?.ready === true ? status.schema : '—'}</dd>
+          <dt className={relayStyles.kvKey}>SQLite</dt>
+          <dd className={relayStyles.kvValue}>
+            {status?.ready === true ? status.sqlite_version : '—'}
+          </dd>
+          <dt className={relayStyles.kvKey}>配置文档</dt>
+          <dd className={relayStyles.kvValue}>
+            {status?.ready === true ? (configured ? '已写入' : '尚未写入') : '—'}
+          </dd>
+        </dl>
+
+        <div className={styles.formGrid}>
+          <SettingsField
+            label="导出备份口令"
+            hint={'至少 ' + MIN_PASSPHRASE + ' 位；口令只用于加密备份，不会保存。'}
+          >
+            <Input
+              type="password"
+              value={backupPhrase}
+              onChange={setBackupPhrase}
+              placeholder="输入备份口令"
+              autoComplete="new-password"
+              disabled={!ready}
+            />
+          </SettingsField>
+        </div>
+        <div className={styles.actions}>
+          <Button
+            theme="solid"
+            onClick={() => void download()}
+            loading={backupBusy}
+            disabled={!ready || backupPhrase.trim().length < MIN_PASSPHRASE}
+          >
+            下载加密备份
+          </Button>
+          <Text type="tertiary" size="small">
+            导出内容包含全部文档与凭据，请按敏感文件保管。
+          </Text>
+        </div>
+      </SettingsCard>
+
+      <SettingsCard
+        title="恢复备份"
+        description="上传不超过 32MiB 的 biliup.backup，输对口令后会整库覆盖；恢复无法撤销。"
+      >
+        <div className={styles.formGrid}>
+          <SettingsField label="选择备份文件" hint={'上限 ' + formatBytes(RELAY_MAX_RESTORE_BYTES) + '。'}>
+            <input
+              className={styles.fileInput}
+              type="file"
+              accept=".backup,application/octet-stream"
+              onChange={pickFile}
+              disabled={!ready}
+            />
+          </SettingsField>
+          <SettingsField label="恢复口令" hint={'与导出时输入的口令一致，至少 ' + MIN_PASSPHRASE + ' 位。'}>
+            <Input
+              type="password"
+              value={restorePhrase}
+              onChange={setRestorePhrase}
+              placeholder="输入备份口令"
+              autoComplete="current-password"
+              disabled={!ready}
+            />
+          </SettingsField>
+        </div>
+
+        {file ? (
+          <Text type="tertiary" size="small">
+            已选择 {file.name}（{formatBytes(file.size)}）
+          </Text>
+        ) : null}
+
+        <div className={styles.actions}>
+          <Button
+            type="danger"
+            theme="solid"
+            onClick={() => setConfirmOpen(true)}
+            disabled={
+              !ready ||
+              !file ||
+              restorePhrase.trim().length < MIN_PASSPHRASE ||
+              restoreBusy
+            }
+          >
+            恢复备份
+          </Button>
+          <Text type="tertiary" size="small">
+            恢复成功后配置与存储状态会自动刷新。
+          </Text>
+        </div>
+      </SettingsCard>
+
+      {confirmOpen && file ? (
+        <FormDialog
+          title="确认恢复备份"
+          visible={confirmOpen}
+          size="sm"
+          okText="覆盖并恢复"
+          okType="danger"
+          onOk={() => restore()}
+          onCancel={() => setConfirmOpen(false)}
+        >
+          <Text>
+            将用 {file.name}（{formatBytes(file.size)}）覆盖当前整库内容，包括配置、Cookie 与统计文档。恢复过程不可撤销，确定继续吗？
+          </Text>
+        </FormDialog>
+      ) : null}
+    </>
+  )
+}
