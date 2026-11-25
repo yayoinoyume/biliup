@@ -16,6 +16,8 @@ pub enum AccountError {
     InsecureKeyPermissions,
     #[error("密钥不匹配或加密数据已损坏")]
     Damaged,
+    #[error("密钥文件缺失，请恢复 accounts.key")]
+    MissingKey,
     #[error("账号文件无效")]
     InvalidAccountFile,
     #[error("凭据序列化失败")]
@@ -25,6 +27,7 @@ pub enum AccountError {
 impl AccountError {
     pub(crate) fn into_io(self) -> io::Error {
         let kind = match &self {
+            Self::MissingKey => io::ErrorKind::NotFound,
             Self::InsecureKeyPermissions => io::ErrorKind::PermissionDenied,
             Self::Random => io::ErrorKind::Other,
             Self::InvalidKey | Self::Damaged | Self::InvalidAccountFile | Self::Serialize(_) => {

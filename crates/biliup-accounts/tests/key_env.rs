@@ -34,10 +34,8 @@ fn key_path_env_override_and_key_validation() {
     let error = AccountStore::open(&data, Some(&short)).err().unwrap();
     assert_eq!(error.kind(), ErrorKind::InvalidData);
 
-    let default_store = AccountStore::open(&data, None).unwrap();
-    assert!(data.join("accounts.key").try_exists().unwrap());
-    assert_eq!(
-        default_store.load(5).err().unwrap().kind(),
-        ErrorKind::InvalidData
-    );
+    let error = AccountStore::open(&data, None).err().unwrap();
+    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert!(error.to_string().contains("密钥文件缺失"));
+    assert!(!data.join("accounts.key").try_exists().unwrap());
 }

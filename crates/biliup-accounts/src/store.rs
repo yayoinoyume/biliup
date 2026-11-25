@@ -29,7 +29,11 @@ impl AccountStore {
         let data_dir = data_dir.as_ref().to_path_buf();
         let accounts = data_dir.join("accounts");
         private_dir(&accounts)?;
-        let key = load_key(&resolve_key_path(&data_dir, key_path)?)?;
+        let key_path = resolve_key_path(&data_dir, key_path)?;
+        if !key_path.try_exists()? && has_ciphertext(&accounts)? {
+            return Err(AccountError::MissingKey.into_io());
+        }
+        let key = load_key(&key_path)?;
         Ok(Self {
             data_dir,
             accounts,
@@ -72,7 +76,9 @@ impl AccountStore {
         let mut migrated = Vec::new();
         let mut backup: Option<PathBuf> = None;
         for (name, path) in sources {
-            let bytes = read_limited(&path)?;
+            let Ok(bytes) = read_limited(&path) else {
+                continue;
+            };
             let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
                 continue;
             };
@@ -80,26 +86,39 @@ impl AccountStore {
                 continue;
             };
             let dest = self.path_for(mid);
-            if dest.try_exists()? {
-                continue;
+            if !dest.try_exists()? {
+                self.save(mid, &value)?;
+                migrated.push(MigratedAccount {
+                    mid,
+                    source: path.clone(),
+                    dest,
+                });
             }
-            self.save(mid, &value)?;
-            let directory = match backup.clone() {
-                Some(directory) => directory,
-                None => {
-                    let directory =
-                        backup_root.join(format!("accounts-migration-{}", utc_stamp()?));
-                    private_dir(&directory)?;
-                    backup = Some(directory.clone());
-                    directory
-                }
-            };
-            let source = path;
-            fs::rename(&source, directory.join(&name))?;
-            migrated.push(MigratedAccount { mid, source, dest });
+            let directory = backup_dir(&mut backup, backup_root)?;
+            fs::rename(&path, directory.join(&name))?;
         }
         Ok(migrated)
     }
+}
+
+fn backup_dir(slot: &mut Option<PathBuf>, root: &Path) -> io::Result<PathBuf> {
+    if let Some(directory) = slot {
+        return Ok(directory.clone());
+    }
+    let directory = root.join(format!("accounts-migration-{}", utc_stamp()?));
+    private_dir(&directory)?;
+    *slot = Some(directory.clone());
+    Ok(directory)
+}
+
+fn has_ciphertext(accounts: &Path) -> io::Result<bool> {
+    for entry in fs::read_dir(accounts)? {
+        let name = entry?.file_name();
+        if name.to_string_lossy().ends_with(".json.enc") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn resolve_key_path(data_dir: &Path, key_path: Option<&Path>) -> io::Result<PathBuf> {
@@ -194,10 +213,11 @@ fn write_atomic(dest: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = dest
         .file_name()
         .ok_or_else(|| AccountError::InvalidAccountFile.into_io())?;
-    let tmp = parent.join(format!("{}.tmp", name.to_string_lossy()));
+    let suffix = crypto::hex(&crypto::random::<8>()?);
+    let tmp = parent.join(format!("{}.{suffix}.tmp", name.to_string_lossy()));
 
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

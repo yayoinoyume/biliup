@@ -94,11 +94,45 @@ fn existing_ciphertext_wins_over_plaintext() {
 
     let migrated = store.migrate_plaintext(&backup).unwrap();
     assert!(migrated.is_empty());
-    assert!(data.join("3033.json").try_exists().unwrap());
+    assert!(!data.join("3033.json").try_exists().unwrap());
     assert_eq!(store.load(3033).unwrap(), encrypted);
-    assert!(backup_dir_missing(&backup));
+
+    let dirs = backup_dirs(&backup);
+    assert_eq!(dirs.len(), 1);
+    assert!(dirs[0].join("3033.json").try_exists().unwrap());
 }
 
-fn backup_dir_missing(root: &Path) -> bool {
-    !root.try_exists().unwrap() || backup_dirs(root).is_empty()
+#[test]
+fn skips_oversized_odd_and_nested_entries() {
+    let dir = TempDir::new().unwrap();
+    let data = dir.path().join("data");
+    let backup = dir.path().join("backup");
+    fs::create_dir_all(&data).unwrap();
+
+    let store = AccountStore::open(&data, None).unwrap();
+    fs::write(
+        data.join("7001.json"),
+        json!({"token_info": {"mid": 7001}}).to_string(),
+    )
+    .unwrap();
+    fs::write(data.join("huge.json"), vec![b'0'; 8 * 1024 * 1024 + 2]).unwrap();
+    fs::write(
+        data.join("stringmid.json"),
+        json!({"token_info": {"mid": "7002"}}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        data.join("accounts").join("7003.json"),
+        json!({"token_info": {"mid": 7003}}).to_string(),
+    )
+    .unwrap();
+
+    let migrated = store.migrate_plaintext(&backup).unwrap();
+    let mids: Vec<u64> = migrated.iter().map(|account| account.mid).collect();
+    assert_eq!(mids, vec![7001]);
+    assert!(!store.path_for(7002).try_exists().unwrap());
+    assert!(!store.path_for(7003).try_exists().unwrap());
+    assert!(data.join("huge.json").try_exists().unwrap());
+    assert!(data.join("stringmid.json").try_exists().unwrap());
+    assert!(data.join("accounts").join("7003.json").try_exists().unwrap());
 }

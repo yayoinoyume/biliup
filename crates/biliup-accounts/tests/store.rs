@@ -61,11 +61,53 @@ fn wrong_key_is_rejected() {
     let store = AccountStore::open(dir.path(), None).unwrap();
     store.save(7, &json!({"token_info": {"mid": 7}})).unwrap();
 
-    fs::remove_file(dir.path().join("accounts.key")).unwrap();
+    let key_path = dir.path().join("accounts.key");
+    fs::remove_file(&key_path).unwrap();
+    fs::write(&key_path, format!("{}\n", "ab".repeat(32))).unwrap();
+    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
     let other = AccountStore::open(dir.path(), None).unwrap();
     let error = other.load(7).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidData);
     assert!(error.to_string().contains("密钥不匹配或加密数据已损坏"));
+}
+
+#[test]
+fn missing_key_with_existing_ciphertext_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let store = AccountStore::open(dir.path(), None).unwrap();
+    store.save(8, &json!({"token_info": {"mid": 8}})).unwrap();
+
+    let key_path = dir.path().join("accounts.key");
+    fs::remove_file(&key_path).unwrap();
+    let error = AccountStore::open(dir.path(), None).err().unwrap();
+    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert!(error.to_string().contains("密钥文件缺失"));
+    assert!(!key_path.try_exists().unwrap());
+    assert!(store.path_for(8).try_exists().unwrap());
+}
+
+#[test]
+fn saving_same_mid_twice_replaces_without_leftovers() {
+    let dir = TempDir::new().unwrap();
+    let store = AccountStore::open(dir.path(), None).unwrap();
+    let first = json!({"token_info": {"mid": 11, "access_token": "first"}});
+    let second = json!({"token_info": {"mid": 11, "access_token": "second"}});
+
+    store.save(11, &first).unwrap();
+    store.save(11, &second).unwrap();
+    assert_eq!(store.load(11).unwrap(), second);
+
+    let mut names: Vec<String> = fs::read_dir(dir.path().join("accounts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["11.json.enc".to_string()]);
+}
+
+#[test]
+fn key_env_is_unset_for_these_cases() {
+    assert!(std::env::var_os(biliup_accounts::KEY_FILE_ENV).is_none());
 }
 
 #[test]
