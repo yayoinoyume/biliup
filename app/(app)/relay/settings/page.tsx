@@ -143,7 +143,16 @@ function SettingsContent() {
           ) : (
             <ConfigUnavailable error={config.error} onRetry={reload} />
           )}
-          <BiliAccountPanel />
+          {data ? (
+            <BiliAccountPanel
+              key={data.secret_revision}
+              data={data}
+              onSaved={saved}
+              onReload={reload}
+            />
+          ) : (
+            <BiliAccountPanel />
+          )}
         </div>
       </TabPane>
       <TabPane tab="风控与过滤" itemKey="rules">

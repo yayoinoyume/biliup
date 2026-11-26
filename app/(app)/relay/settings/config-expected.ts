@@ -14,6 +14,7 @@ export type RelayConfigFormKey =
   | 'auto_cover'
   | 'enable_anti_collision'
   | 'enable_danmaku_command'
+  | 'account_id'
   | 'holodex_monitor_gate'
   | 'enable_lol_monitor'
   | 'lol_monitor_interval'
@@ -67,6 +68,8 @@ export function configFormValue(data: RelayConfigResponse, key: RelayConfigFormK
       return data.enable_anti_collision
     case 'enable_danmaku_command':
       return data.bilibili.enable_danmaku_command
+    case 'account_id':
+      return data.account_id ?? null
     case 'holodex_monitor_gate':
       return data.holodex_monitor_gate
     case 'enable_lol_monitor':

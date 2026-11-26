@@ -450,6 +450,8 @@ export interface RelayConfigResponse {
   warning_hold_exempt_reasons: string[]
   warning_hold_exempt_all_low_risk: boolean
   warning_hold_exempt_channels: { name: string; platforms: { platform: string; channel_id: string }[] }[]
+  account_id?: number | null
+  account_mid?: number | null
   /** 当前配置内容指纹：写回时放在 `expected_secret_revision` 里做三方校验。 */
   secret_revision: number
 }
@@ -505,6 +507,7 @@ export interface RelayUpdateConfigRequest {
   youtube_deno_path?: string
   anti_collision_list?: Record<string, number>
   enable_danmaku_command?: boolean
+  account_id?: number | null
   youtube_enable_monitor?: boolean
   twitch_enable_monitor?: boolean
   warning_hold_exempt?: RelayExemptChannel[]

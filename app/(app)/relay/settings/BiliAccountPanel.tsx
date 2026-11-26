@@ -1,26 +1,39 @@
 'use client'
 
-import { Button, Tag, Toast, Typography } from '@douyinfe/semi-ui'
+import { Banner, Button, Select, Tag, Toast, Typography } from '@douyinfe/semi-ui'
 import Image from 'next/image'
+import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import useSWR from 'swr'
+import type { User } from '@/app/lib/api-streamer'
 import {
   relaySetupBiliRoom,
   relaySetupLoginStatus,
   relaySetupPollLogin,
   relaySetupQrCode,
   relaySetupStatus,
+  relayUpdateConfig,
+  type RelayConfigResponse,
   type RelayQrCode,
 } from '@/app/lib/relay'
+import { useMe } from '@/app/lib/use-me'
+import { useBiliUsers } from '@/app/lib/use-streamers'
 import RelayError, { relayErrorMessage } from '@/app/ui/relay/RelayError'
 import relayStyles from '@/app/ui/relay/relay.module.scss'
 import { FormDialog } from '@/app/ui/shell'
-import { SettingsCard } from './shared'
+import { expectedConfigValues } from './config-expected'
+import { SaveErrorBanner, SaveRow, SettingsCard, SettingsField, useSettingsSave } from './shared'
 import styles from './settings.module.scss'
 
 const { Text, Title } = Typography
 
-export default function BiliAccountPanel() {
+export interface BiliAccountPanelProps {
+  data?: RelayConfigResponse
+  onSaved?: () => Promise<unknown>
+  onReload?: () => void
+}
+
+export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccountPanelProps) {
   const setup = useSWR('relay:setup-status', relaySetupStatus, { revalidateOnFocus: false })
   const login = useSWR('relay:setup-login-status', relaySetupLoginStatus, {
     revalidateOnFocus: false,
@@ -33,6 +46,53 @@ export default function BiliAccountPanel() {
   const { mutate: mutateLogin } = login
   const { mutate: mutateRoom } = room
   const { mutate: mutateSetup } = setup
+  const saveState = useSettingsSave()
+  const router = useRouter()
+  const { can } = useMe()
+  const canPickAccount = can('template.edit')
+  const { biliUsers, isLoading: usersLoading, isError: usersError } = useBiliUsers()
+  const accounts = biliUsers as User[]
+  const [accountId, setAccountId] = useState<number | null>(data?.account_id ?? null)
+
+  const savedAccountId = data?.account_id ?? null
+  const dirty = data !== undefined && accountId !== savedAccountId
+  const accountsReady = canPickAccount && !usersLoading && !usersError
+  const missingFromList =
+    accountsReady &&
+    savedAccountId !== null &&
+    !accounts.some((account) => account.id === savedAccountId)
+  const midMissing =
+    data !== undefined && savedAccountId !== null && (data.account_mid ?? null) === null
+  const savedUnavailable =
+    data !== undefined && savedAccountId !== null && (midMissing || missingFromList)
+
+  const accountOptions = accounts.map((account) => ({
+    label: account.name?.trim() ? account.name : `账号 #${account.id}`,
+    value: account.id,
+  }))
+  if (missingFromList && savedAccountId !== null) {
+    accountOptions.unshift({
+      label: `账号 #${savedAccountId}（已不可用）`,
+      value: savedAccountId,
+    })
+  }
+
+  const saveAccount = async () => {
+    if (!data || !dirty) return
+    await saveState.run(
+      () =>
+        relayUpdateConfig({
+          account_id: accountId,
+          expected: expectedConfigValues(data, ['account_id']),
+        }),
+      async () => {
+        if (onSaved) await onSaved()
+        void mutateLogin()
+        void mutateRoom()
+        void mutateSetup()
+      },
+    )
+  }
 
   const startLogin = async () => {
     setBusy(true)
@@ -92,6 +152,9 @@ export default function BiliAccountPanel() {
 
   return (
     <>
+      {data && onReload ? (
+        <SaveErrorBanner error={saveState.error} onReload={onReload} />
+      ) : null}
       <SettingsCard
         title="B 站转播账号"
         description="扫码登录写的是转播底座自己的加密 B 站凭据，和宿主 biliup 的账号登录是两套数据，互不覆盖。"
@@ -127,6 +190,76 @@ export default function BiliAccountPanel() {
               void room.mutate()
             }}
           />
+        ) : null}
+
+        {data ? (
+          <>
+            {savedUnavailable ? (
+              <Banner
+                type="warning"
+                closeIcon={null}
+                title="当前选中的账号已不可用"
+                description="转播会回退到转播底座自己的 cookies.json。请重新选择账号，或清空后保存来固定回退。"
+              />
+            ) : null}
+            <SettingsField
+              label="转播账号"
+              hint="不选 = 使用转播底座自己的 cookies.json；选了 = 使用账号中心对应账号的凭据。"
+            >
+              <Select
+                value={accountId ?? undefined}
+                optionList={accountOptions}
+                placeholder="不使用账号中心（用转播底座自己的 cookies.json）"
+                style={{ width: '100%' }}
+                showClear
+                loading={usersLoading}
+                disabled={!canPickAccount}
+                onChange={(value) => {
+                  setAccountId(typeof value === 'number' ? value : null)
+                }}
+                aria-label="转播账号"
+              />
+            </SettingsField>
+            {!canPickAccount ? (
+              <Text type="tertiary" size="small">
+                需要「编辑投稿模板」权限才能读取账号列表并选择转播账号。
+              </Text>
+            ) : null}
+            {usersError ? (
+              <Text type="danger" size="small">
+                账号列表加载失败：{relayErrorMessage(usersError)}
+              </Text>
+            ) : null}
+            {accountsReady && accounts.length === 0 ? (
+              <Text type="tertiary" size="small">
+                账号中心还没有 B 站账号；可以先去「管理账号」添加。
+              </Text>
+            ) : null}
+            <div className={styles.actions}>
+              <Button
+                theme="light"
+                disabled={!canPickAccount}
+                onClick={() => router.push('/upload-manager')}
+              >
+                管理账号
+              </Button>
+              <Text type="tertiary" size="small">
+                保存后，之后开播会使用所选账号的凭据。
+              </Text>
+            </div>
+            <SaveRow
+              dirty={dirty}
+              saving={saveState.saving}
+              onSave={() => {
+                void saveAccount()
+              }}
+              onReset={() => {
+                setAccountId(savedAccountId)
+                saveState.clearError()
+              }}
+              okText="保存转播账号"
+            />
+          </>
         ) : null}
 
         <dl className={relayStyles.kv}>
