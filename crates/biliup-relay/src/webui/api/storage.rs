@@ -6,6 +6,7 @@ use std::io;
 
 use axum::Json;
 use axum::extract::Json as JsonBody;
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
@@ -99,6 +100,85 @@ pub async fn clear_youtube_cookies(JsonBody(payload): JsonBody<Revision>) -> Res
     storage_response(
         crate::plugins::youtube_cookies::clear(payload.expected_revision).await,
         "Cookie 已清除",
+    )
+}
+
+#[derive(Deserialize)]
+pub struct AccountCreateRequest {
+    label: String,
+    expected_revision: u64,
+    source: AccountSourceBody,
+}
+
+/// source 是内联标签联合：{"type":"browser","browser":"chrome","profile":"Default"}
+/// 或 {"type":"cookies","content":"..."}。
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum AccountSourceBody {
+    Browser {
+        browser: String,
+        #[serde(default)]
+        profile: Option<String>,
+    },
+    Cookies {
+        content: String,
+    },
+}
+
+#[derive(Deserialize)]
+pub struct AccountDeleteRequest {
+    expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+pub struct AccountSelectRequest {
+    #[serde(default)]
+    id: Option<String>,
+    expected_revision: u64,
+}
+
+pub async fn youtube_accounts_status() -> Response {
+    let result = tokio::task::spawn_blocking(crate::plugins::youtube_cookies::accounts_status)
+        .await
+        .map_err(io::Error::other)
+        .and_then(|result| result);
+    storage_response(result, "")
+}
+
+pub async fn add_youtube_account(JsonBody(payload): JsonBody<AccountCreateRequest>) -> Response {
+    let AccountCreateRequest {
+        label,
+        expected_revision,
+        source,
+    } = payload;
+    let source = match source {
+        AccountSourceBody::Browser { browser, profile } => {
+            crate::plugins::youtube_cookies::AccountSource::Browser { browser, profile }
+        }
+        AccountSourceBody::Cookies { content } => {
+            crate::plugins::youtube_cookies::AccountSource::Cookies { content }
+        }
+    };
+    storage_response(
+        crate::plugins::youtube_cookies::add(label, expected_revision, source).await,
+        "账号已添加",
+    )
+}
+
+pub async fn delete_youtube_account(
+    Path(id): Path<String>,
+    JsonBody(payload): JsonBody<AccountDeleteRequest>,
+) -> Response {
+    storage_response(
+        crate::plugins::youtube_cookies::delete(id, payload.expected_revision).await,
+        "账号已删除",
+    )
+}
+
+pub async fn select_youtube_account(JsonBody(payload): JsonBody<AccountSelectRequest>) -> Response {
+    storage_response(
+        crate::plugins::youtube_cookies::select(payload.id, payload.expected_revision).await,
+        "已更新选中的 YouTube 账号",
     )
 }
 

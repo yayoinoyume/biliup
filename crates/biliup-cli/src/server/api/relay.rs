@@ -170,6 +170,18 @@ pub fn router(services: ServiceRegister) -> Router<()> {
                 .delete(api::storage::clear_youtube_cookies),
         )
         .route(
+            "/v1/relay/youtube/accounts",
+            get(api::storage::youtube_accounts_status).post(api::storage::add_youtube_account),
+        )
+        .route(
+            "/v1/relay/youtube/accounts/selected",
+            post(api::storage::select_youtube_account),
+        )
+        .route(
+            "/v1/relay/youtube/accounts/{id}",
+            delete(api::storage::delete_youtube_account),
+        )
+        .route(
             "/v1/relay/player-filter",
             get(api::storage::get_player_filter).post(api::storage::save_player_filter),
         )

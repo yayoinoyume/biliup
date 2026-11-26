@@ -789,6 +789,26 @@ export interface RelayYoutubeCookieStatus {
   updated_at: number
 }
 
+export type RelayYoutubeAccountSource = 'browser' | 'cookies'
+
+/** 账号列表项：后端从不回传 Cookie 原文，只给条数。 */
+export interface RelayYoutubeAccount {
+  id: string
+  label: string
+  source_type: RelayYoutubeAccountSource
+  browser?: string
+  profile?: string
+  cookie_count: number
+  updated_at: number
+}
+
+/** 选中的账号优先；selected_id 为空时回退旧的单份 cookies.txt。 */
+export interface RelayYoutubeAccounts {
+  revision: number
+  selected_id: string | null
+  accounts: RelayYoutubeAccount[]
+}
+
 export interface RelayPlayerFilter {
   content: string
   revision: number
@@ -1072,6 +1092,8 @@ const RELAY = '/v1/relay'
 const RELAY_NICONICO_SESSION = `${RELAY}/niconico/session`
 /** 设置里的 YouTube Cookie 路由：与 relay.rs:167 的字面量逐字节一致（斜杠分段）。 */
 const RELAY_YOUTUBE_COOKIES = `${RELAY}/youtube/cookies`
+/** 设置里的 YouTube 多账号路由：与 relay.rs 的字面量逐字节一致。 */
+const RELAY_YOUTUBE_ACCOUNTS = `${RELAY}/youtube/accounts`
 
 /* ---------------------------------------------------------- 裸对象端点 */
 
@@ -1550,6 +1572,27 @@ export async function relayClearYoutubeCookies(
     body: JSON.stringify({ expected_revision: expectedRevision }),
   })
   const envelope = (await response.json()) as RelayEnvelope<RelayYoutubeCookieStatus>
+  return unwrapData(envelope)
+}
+
+/** GET /v1/relay/youtube/accounts —— 账号列表与当前选中项（不含 Cookie 内容）。 */
+export async function relayYoutubeAccounts(): Promise<RelayYoutubeAccounts> {
+  const envelope = await relayGetJson<RelayEnvelope<RelayYoutubeAccounts>>(
+    RELAY_YOUTUBE_ACCOUNTS,
+  )
+  return unwrapData(envelope)
+}
+
+/** POST /v1/relay/youtube/accounts/selected —— 选中账号；id 传 null 表示回退旧 Cookie。 */
+export async function relaySelectYoutubeAccount(
+  id: string | null,
+  expectedRevision: number,
+): Promise<RelayYoutubeAccounts> {
+  const envelope = await relaySendJson<RelayEnvelope<RelayYoutubeAccounts>>(
+    `${RELAY_YOUTUBE_ACCOUNTS}/selected`,
+    { id, expected_revision: expectedRevision },
+    'POST',
+  )
   return unwrapData(envelope)
 }
 

@@ -540,7 +540,10 @@ fn relay_permission(method: &Method, route: &str) -> Option<Permission> {
         {
             RelayConfig
         }
-        "/v1/relay/youtube/cookies" => RelayConfig,
+        "/v1/relay/youtube/cookies"
+        | "/v1/relay/youtube/accounts"
+        | "/v1/relay/youtube/accounts/{id}"
+        | "/v1/relay/youtube/accounts/selected" => RelayConfig,
         _ => return None,
     };
     Some(permission)
@@ -759,6 +762,10 @@ mod tests {
             ("PUT", "/v1/relay/manage/channels"),
             ("DELETE", "/v1/relay/manage/areas/{id}"),
             ("DELETE", "/v1/relay/manage/channels/{name}"),
+            ("GET", "/v1/relay/youtube/accounts"),
+            ("POST", "/v1/relay/youtube/accounts"),
+            ("POST", "/v1/relay/youtube/accounts/selected"),
+            ("DELETE", "/v1/relay/youtube/accounts/{id}"),
             ("GET", "/v1/relay/storage"),
             ("GET", "/v1/relay/setup/login-status"),
             ("GET", "/v1/relay/setup/qrcode"),

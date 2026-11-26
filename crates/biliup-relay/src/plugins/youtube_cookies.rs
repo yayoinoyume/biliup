@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 //! A managed Cookie jar with serialized, private-file yt-dlp round trips.
 use crate::storage::{self, paths, Store};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -14,6 +14,11 @@ use tokio::sync::Mutex as AsyncMutex;
 
 pub const MAX_COOKIE_BYTES: usize = 1024 * 1024;
 const NAME: &str = "cookies.txt";
+const ACCOUNTS: &str = "youtube-accounts.json";
+const MAX_ACCOUNTS: usize = 16;
+const MAX_LABEL_CHARS: usize = 80;
+const MAX_BROWSER_CHARS: usize = 64;
+const MAX_PROFILE_CHARS: usize = 64;
 
 #[derive(Debug, Serialize)]
 pub struct CookieSummary {
@@ -134,6 +139,295 @@ pub async fn clear(expected_revision: u64) -> io::Result<CookieStatus> {
     .map_err(io::Error::other)?
 }
 
+/// 一个 YouTube 账号：浏览器登录态或导出过的 cookies.txt，二者只存其一。
+///
+/// 文档整体加密入库（youtube-accounts.json 不在明文名单里），接口从不回传 Cookie。
+#[derive(Clone, Serialize, Deserialize)]
+struct Account {
+    id: String,
+    label: String,
+    source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    browser: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cookies: Option<String>,
+    count: usize,
+    created_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct AccountsDoc {
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    selected_id: Option<String>,
+    #[serde(default)]
+    accounts: Vec<Account>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccountView {
+    pub id: String,
+    pub label: String,
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub cookie_count: usize,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccountsStatus {
+    pub revision: u64,
+    pub selected_id: Option<String>,
+    pub accounts: Vec<AccountView>,
+}
+
+pub enum AccountSource {
+    Browser {
+        browser: String,
+        profile: Option<String>,
+    },
+    Cookies {
+        content: String,
+    },
+}
+
+fn accounts_error(message: &str, kind: io::ErrorKind) -> io::Error {
+    io::Error::new(kind, message)
+}
+
+/// 单行文本：去掉首尾空白后仍有内容，且不含控制字符。
+fn clean_text(value: &str, limit: usize, what: &str) -> io::Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > limit || trimmed.chars().any(char::is_control)
+    {
+        return Err(accounts_error(
+            &format!("{what}无效或过长"),
+            io::ErrorKind::InvalidInput,
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// yt-dlp 的 --cookies-from-browser 参数片段：不允许冒号分段，也不许以 - 开头。
+fn clean_arg(value: &str, limit: usize, what: &str) -> io::Result<String> {
+    let value = clean_text(value, limit, what)?;
+    if value.starts_with('-') || value.contains(':') {
+        return Err(accounts_error(
+            &format!("{what}无效或过长"),
+            io::ErrorKind::InvalidInput,
+        ));
+    }
+    Ok(value)
+}
+
+fn accounts_from(value: Option<&Value>) -> io::Result<AccountsDoc> {
+    let Some(value) = value else {
+        return Ok(AccountsDoc::default());
+    };
+    serde_json::from_value(value.clone()).map_err(|_| {
+        accounts_error(
+            "YouTube 账号数据已损坏，请重新导入",
+            io::ErrorKind::InvalidData,
+        )
+    })
+}
+
+fn view_of(doc: &AccountsDoc) -> AccountsStatus {
+    AccountsStatus {
+        revision: doc.revision,
+        selected_id: doc.selected_id.clone(),
+        accounts: doc
+            .accounts
+            .iter()
+            .map(|account| AccountView {
+                id: account.id.clone(),
+                label: account.label.clone(),
+                source_type: account.source.clone(),
+                browser: account.browser.clone(),
+                profile: account.profile.clone(),
+                cookie_count: account.count,
+                updated_at: account.updated_at,
+            })
+            .collect(),
+    }
+}
+
+fn status_of(store: &Store) -> io::Result<AccountsStatus> {
+    let doc = store.read(ACCOUNTS)?;
+    let doc = accounts_from(doc.as_ref().map(|doc| &doc.value))?;
+    Ok(view_of(&doc))
+}
+
+pub fn accounts_status() -> io::Result<AccountsStatus> {
+    status_of(storage::global()?.as_ref())
+}
+
+/// 读-改-写在一段 IMMEDIATE 事务里完成：revision 冲突时整次修改都不生效。
+fn update(
+    store: Arc<Store>,
+    expected: u64,
+    edit: impl FnOnce(&mut AccountsDoc) -> io::Result<()> + Send + 'static,
+) -> io::Result<AccountsStatus> {
+    store.transaction(move |tx| {
+        let mut doc = accounts_from(tx.read(ACCOUNTS)?.as_ref().map(|doc| &doc.value))?;
+        if doc.revision != expected {
+            return Err(accounts_error(
+                "账号列表已更新，请刷新后重试",
+                io::ErrorKind::WouldBlock,
+            ));
+        }
+        edit(&mut doc)?;
+        doc.revision += 1;
+        tx.write(
+            ACCOUNTS,
+            serde_json::to_value(&doc).map_err(|_| invalid())?,
+        )?;
+        Ok(view_of(&doc))
+    })
+}
+
+fn prepare(label: &str, source: AccountSource) -> io::Result<Account> {
+    let label = clean_text(label, MAX_LABEL_CHARS, "账号名称")?;
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce).map_err(|_| io::Error::other("无法生成账号标识"))?;
+    let id = nonce.iter().map(|n| format!("{n:02x}")).collect::<String>();
+    let now = storage::now();
+    let (source, browser, profile, cookies, count) = match source {
+        AccountSource::Browser { browser, profile } => {
+            let browser = clean_arg(&browser, MAX_BROWSER_CHARS, "浏览器名")?;
+            let profile = profile
+                .map(|value| clean_arg(&value, MAX_PROFILE_CHARS, "浏览器配置"))
+                .transpose()?;
+            ("browser", Some(browser), profile, None, 0)
+        }
+        AccountSource::Cookies { content } => {
+            let summary = validate_netscape(&content)?;
+            if summary.count == 0 {
+                return Err(accounts_error(
+                    "文件中没有 Cookie，请重新导出 cookies.txt",
+                    io::ErrorKind::InvalidInput,
+                ));
+            }
+            ("cookies", None, None, Some(content), summary.count)
+        }
+    };
+    Ok(Account {
+        id,
+        label,
+        source: source.to_owned(),
+        browser,
+        profile,
+        cookies,
+        count,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+pub async fn add(
+    label: String,
+    expected_revision: u64,
+    source: AccountSource,
+) -> io::Result<AccountsStatus> {
+    let account = prepare(&label, source)?;
+    let store = storage::global()?;
+    tokio::task::spawn_blocking(move || {
+        update(store, expected_revision, move |doc| {
+            if doc.accounts.len() >= MAX_ACCOUNTS {
+                return Err(accounts_error(
+                    "账号数量已达上限，请先删除不用的账号",
+                    io::ErrorKind::InvalidInput,
+                ));
+            }
+            doc.accounts.push(account);
+            Ok(())
+        })
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+pub async fn delete(id: String, expected_revision: u64) -> io::Result<AccountsStatus> {
+    let store = storage::global()?;
+    tokio::task::spawn_blocking(move || {
+        update(store, expected_revision, move |doc| {
+            if doc.accounts.iter().all(|account| account.id != id) {
+                return Err(accounts_error(
+                    "账号不存在，请刷新后重试",
+                    io::ErrorKind::InvalidInput,
+                ));
+            }
+            doc.accounts.retain(|account| account.id != id);
+            if doc.selected_id.as_deref() == Some(id.as_str()) {
+                doc.selected_id = None;
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+pub async fn select(id: Option<String>, expected_revision: u64) -> io::Result<AccountsStatus> {
+    let store = storage::global()?;
+    tokio::task::spawn_blocking(move || {
+        update(store, expected_revision, move |doc| {
+            match id {
+                Some(id) => {
+                    if doc.accounts.iter().all(|account| account.id != id) {
+                        return Err(accounts_error(
+                            "账号不存在，请刷新后重试",
+                            io::ErrorKind::InvalidInput,
+                        ));
+                    }
+                    doc.selected_id = Some(id);
+                }
+                None => doc.selected_id = None,
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// 写回账号里的 Cookie（yt-dlp 会刷新过期时间）：文档已变则本次结果作废。
+fn writeback(store: &Store, id: String, revision: u64, text: String) -> io::Result<()> {
+    store.transaction(move |tx| {
+        let mut doc = accounts_from(tx.read(ACCOUNTS)?.as_ref().map(|doc| &doc.value))?;
+        if doc.revision != revision {
+            return Err(accounts_error(
+                "账号 Cookie 已更新，请重试查询",
+                io::ErrorKind::WouldBlock,
+            ));
+        }
+        let now = storage::now();
+        let count = validate_netscape(&text)?.count;
+        let Some(account) = doc.accounts.iter_mut().find(|account| account.id == id) else {
+            return Err(accounts_error(
+                "账号已被删除，请重新选择",
+                io::ErrorKind::WouldBlock,
+            ));
+        };
+        account.cookies = Some(text);
+        account.count = count;
+        account.updated_at = now;
+        doc.revision += 1;
+        tx.write(
+            ACCOUNTS,
+            serde_json::to_value(&doc).map_err(|_| invalid())?,
+        )?;
+        Ok(())
+    })
+}
+
 fn queue(store: &Store) -> Arc<AsyncMutex<()>> {
     static QUEUES: OnceLock<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> = OnceLock::new();
     let mut queues = QUEUES
@@ -211,6 +505,62 @@ pub(crate) fn cleanup_stale(directory: &std::path::Path) {
     }
 }
 
+/// 运行期凭据：选中的账号优先，其后才回退旧的浏览器设置与 cookies.txt。
+enum Credential {
+    Browser(String),
+    LegacyJar(String),
+    AccountJar {
+        id: String,
+        revision: u64,
+        text: String,
+    },
+}
+
+fn resolve(store: &Store, legacy_browser: Option<String>) -> io::Result<Option<Credential>> {
+    let doc = store.read(ACCOUNTS)?;
+    let doc = accounts_from(doc.as_ref().map(|doc| &doc.value))?;
+    if let Some(id) = doc.selected_id.clone() {
+        match doc.accounts.iter().find(|account| account.id == id) {
+            Some(account) if account.source == "browser" => {
+                let browser = account.browser.clone().unwrap_or_default();
+                if !browser.is_empty() {
+                    let mut value = browser;
+                    if let Some(profile) = account.profile.clone().filter(|p| !p.is_empty()) {
+                        value.push(':');
+                        value.push_str(&profile);
+                    }
+                    return Ok(Some(Credential::Browser(value)));
+                }
+                tracing::warn!("已选中的 YouTube 账号缺少浏览器名，回退旧 Cookie 配置");
+            }
+            Some(account)
+                if account
+                    .cookies
+                    .as_deref()
+                    .is_some_and(|text| validate_netscape(text).is_ok_and(|s| s.count > 0)) =>
+            {
+                return Ok(Some(Credential::AccountJar {
+                    id: account.id.clone(),
+                    revision: doc.revision,
+                    text: account.cookies.clone().unwrap_or_default(),
+                }));
+            }
+            _ => tracing::warn!("已选中的 YouTube 账号不可用，回退旧 Cookie 配置"),
+        }
+    }
+    if let Some(browser) = legacy_browser.filter(|value| !value.trim().is_empty()) {
+        return Ok(Some(Credential::Browser(browser)));
+    }
+    let Some(doc) = store.read(NAME)? else {
+        return Ok(None);
+    };
+    let text = doc.value.as_str().ok_or_else(invalid)?;
+    if validate_netscape(text)?.count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(Credential::LegacyJar(text.to_owned())))
+}
+
 pub async fn run(command: Command, browser: Option<String>, limit: Duration) -> io::Result<Output> {
     run_with_store(storage::global()?, command, browser, limit).await
 }
@@ -233,23 +583,33 @@ async fn run_with_store(
             };
             let mut jar = None;
             let mut expected = 0;
+            let mut account: Option<(String, u64)> = None;
             // Ignore external yt-dlp config; it could override the managed jar.
             command.args(["--ignore-config", "--no-cookies", "--no-cookies-from-browser"]);
-            if let Some(browser) = browser.filter(|s| !s.trim().is_empty()) {
-                command.arg("--cookies-from-browser").arg(browser);
-            } else if let Some(doc) = store.read(NAME)? {
-                expected = doc.revision;
-                let text = doc.value.as_str().ok_or_else(invalid)?;
-                if validate_netscape(text)?.count > 0 {
-                    let temporary = TemporaryJar::create(&store, text)?;
+            match resolve(&store, browser)? {
+                Some(Credential::Browser(value)) => {
+                    command.arg("--cookies-from-browser").arg(value);
+                }
+                Some(Credential::LegacyJar(text)) => {
+                    expected = store.revision(NAME)?.unwrap_or(0);
+                    let temporary = TemporaryJar::create(&store, &text)?;
                     command.arg("--cookies").arg(&temporary.path);
                     jar = Some(temporary);
                 }
+                Some(Credential::AccountJar { id, revision, text }) => {
+                    account = Some((id, revision));
+                    let temporary = TemporaryJar::create(&store, &text)?;
+                    command.arg("--cookies").arg(&temporary.path);
+                    jar = Some(temporary);
+                }
+                None => {}
             }
             let mut output = super::subprocess::command_output_cancellable(command, deadline, "yt-dlp", sender.closed(), jar.as_ref().map(|jar| jar.directory.join("child.pid")).as_deref()).await?;
             if let Some(jar) = jar {
-                let current = store.read(NAME)?.map(|d| d.revision).unwrap_or(0);
-                if current != expected { return Err(io::Error::new(io::ErrorKind::WouldBlock, "Cookie 已更新，请重试查询")); }
+                if account.is_none() {
+                    let current = store.read(NAME)?.map(|d| d.revision).unwrap_or(0);
+                    if current != expected { return Err(io::Error::new(io::ErrorKind::WouldBlock, "Cookie 已更新，请重试查询")); }
+                }
                 if output.status.success() {
                     let metadata = fs::metadata(&jar.path)?;
                     if metadata.len() > MAX_COOKIE_BYTES as u64 { return Err(invalid()); }
@@ -257,7 +617,14 @@ async fn run_with_store(
                     if updated.is_empty() || !updated.ends_with('\n') { return Err(invalid()); }
                     validate_netscape(&updated)?;
                     let store = Arc::clone(&store);
-                    tokio::task::spawn_blocking(move || store.compare_exchange(NAME, expected, Value::String(updated))).await.map_err(io::Error::other)??;
+                    match account {
+                        Some((id, revision)) => {
+                            tokio::task::spawn_blocking(move || writeback(&store, id, revision, updated)).await.map_err(io::Error::other)??;
+                        }
+                        None => {
+                            tokio::task::spawn_blocking(move || store.compare_exchange(NAME, expected, Value::String(updated))).await.map_err(io::Error::other)??;
+                        }
+                    }
                 }
                 drop(jar);
             }
@@ -365,6 +732,9 @@ print('synthetic-result')
             let store = Store::open(self.0.join("data"), self.0.join("keys/master")).unwrap();
             store.write(NAME, json!(INITIAL)).unwrap();
             store
+        }
+        fn empty_store(&self) -> Arc<Store> {
+            Store::open(self.0.join("accounts-data"), self.0.join("accounts-keys/master")).unwrap()
         }
         fn command(&self, mode: &str) -> Command {
             let mut command = Command::new("python3");
@@ -535,6 +905,195 @@ print('synthetic-result')
         .await;
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_eq!(store.read(NAME).unwrap().unwrap().value, INITIAL);
+        clean(&store);
+    }
+
+    #[test]
+    fn account_validation_rejects_control_chars_and_empty_cookies() {
+        assert!(prepare("", AccountSource::Cookies { content: INITIAL.to_owned() }).is_err());
+        assert!(prepare(
+            "ok",
+            AccountSource::Browser {
+                browser: "chrome\n--evil".to_owned(),
+                profile: None,
+            }
+        )
+        .is_err());
+        assert!(prepare(
+            "ok",
+            AccountSource::Browser {
+                browser: "chrome:Work".to_owned(),
+                profile: None,
+            }
+        )
+        .is_err());
+        assert!(prepare(
+            "ok",
+            AccountSource::Browser {
+                browser: "--cookies-from-browser".to_owned(),
+                profile: None,
+            }
+        )
+        .is_err());
+        assert!(prepare(
+            "ok",
+            AccountSource::Cookies {
+                content: "# Netscape HTTP Cookie File\n".to_owned(),
+            }
+        )
+        .is_err());
+        assert!(prepare(
+            "ok",
+            AccountSource::Cookies {
+                content: "invalid-secret-row".to_owned(),
+            }
+        )
+        .is_err());
+
+        let account = prepare(
+            " 手机 ",
+            AccountSource::Browser {
+                browser: " chrome ".to_owned(),
+                profile: Some(" Default ".to_owned()),
+            },
+        )
+        .unwrap();
+        assert_eq!(account.label, "手机");
+        assert_eq!(account.browser.as_deref(), Some("chrome"));
+        assert_eq!(account.profile.as_deref(), Some("Default"));
+        assert_eq!(account.count, 0);
+        assert_eq!(account.id.len(), 16);
+        assert!(account.id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn accounts_edit_atomically_and_reject_a_stale_revision() {
+        let dir = Directory::new();
+        let store = dir.empty_store();
+        let added = update(Arc::clone(&store), 0, |doc| {
+            doc.accounts.push(prepare(
+                "手机",
+                AccountSource::Cookies {
+                    content: INITIAL.to_owned(),
+                },
+            )?);
+            doc.selected_id = doc.accounts.first().map(|account| account.id.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(added.revision, 1);
+        assert_eq!(added.accounts.len(), 1);
+        assert_eq!(added.accounts[0].cookie_count, 1);
+        assert_eq!(added.accounts[0].source_type, "cookies");
+        assert_eq!(added.selected_id, Some(added.accounts[0].id.clone()));
+
+        let stale = update(Arc::clone(&store), 0, |doc| {
+            doc.accounts.clear();
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(stale.kind(), io::ErrorKind::WouldBlock);
+
+        let cleared = update(Arc::clone(&store), 1, |doc| {
+            doc.selected_id = None;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(cleared.revision, 2);
+        assert_eq!(cleared.selected_id, None);
+
+        let id = added.accounts[0].id.clone();
+        let deleted = update(Arc::clone(&store), 2, move |doc| {
+            doc.accounts.retain(|account| account.id != id);
+            Ok(())
+        })
+        .unwrap();
+        assert!(deleted.accounts.is_empty());
+    }
+
+    #[test]
+    fn selected_account_wins_over_legacy_browser_and_cookies_txt() {
+        let dir = Directory::new();
+        let store = dir.store();
+        assert!(matches!(
+            resolve(&store, Some("chrome".to_owned())).unwrap(),
+            Some(Credential::Browser(_))
+        ));
+        assert!(matches!(
+            resolve(&store, None).unwrap(),
+            Some(Credential::LegacyJar(_))
+        ));
+
+        let account = prepare(
+            "浏览器",
+            AccountSource::Browser {
+                browser: "firefox".to_owned(),
+                profile: Some("work".to_owned()),
+            },
+        )
+        .unwrap();
+        let id = account.id.clone();
+        update(Arc::clone(&store), 0, move |doc| {
+            doc.selected_id = Some(account.id.clone());
+            doc.accounts.push(account);
+            Ok(())
+        })
+        .unwrap();
+        match resolve(&store, Some("chrome".to_owned())).unwrap() {
+            Some(Credential::Browser(value)) => assert_eq!(value, "firefox:work"),
+            _ => panic!("选中账号必须盖过旧浏览器设置"),
+        }
+
+        update(Arc::clone(&store), 1, move |doc| {
+            doc.accounts.retain(|account| account.id != id);
+            Ok(())
+        })
+        .unwrap();
+        match resolve(&store, Some("chrome".to_owned())).unwrap() {
+            Some(Credential::Browser(value)) => assert_eq!(value, "chrome"),
+            _ => panic!("选中账号失效时必须回退旧配置"),
+        }
+    }
+
+    #[tokio::test]
+    async fn account_cookies_are_written_back_and_read_back_as_a_jar() {
+        let dir = Directory::new();
+        let store = dir.empty_store();
+        let account = prepare(
+            "手机",
+            AccountSource::Cookies {
+                content: INITIAL.to_owned(),
+            },
+        )
+        .unwrap();
+        let id = account.id.clone();
+        update(Arc::clone(&store), 0, move |doc| {
+            doc.selected_id = Some(account.id.clone());
+            doc.accounts.push(account);
+            Ok(())
+        })
+        .unwrap();
+
+        let output = run_with_store(
+            Arc::clone(&store),
+            dir.command("increment"),
+            None,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(output.status.success());
+        let after = status_of(&store).unwrap();
+        assert_eq!(after.revision, 2);
+        let doc = store.read(ACCOUNTS).unwrap().unwrap();
+        assert!(doc.value["accounts"][0]["cookies"]
+            .as_str()
+            .unwrap()
+            .ends_with("\t2\n"));
+        assert_eq!(doc.value["accounts"][0]["count"], json!(1));
+
+        let stale = writeback(&store, id, 1, INITIAL.to_owned()).unwrap_err();
+        assert_eq!(stale.kind(), io::ErrorKind::WouldBlock);
         clean(&store);
     }
 }
