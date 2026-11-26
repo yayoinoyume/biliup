@@ -70,6 +70,9 @@ pub(crate) fn validate(name: &str, value: &Value) -> io::Result<()> {
                 crate::plugins::youtube_cookies::validate_netscape(text).map_err(|_| bad())?;
             }
         }
+        "youtube-accounts.json" => {
+            crate::plugins::youtube_cookies::validate_accounts(value).map_err(|_| bad())?;
+        }
         "invalid_words.txt" => {
             if !value.is_string() {
                 return Err(bad());

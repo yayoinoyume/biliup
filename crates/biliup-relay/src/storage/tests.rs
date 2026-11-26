@@ -671,3 +671,90 @@ fn a_parent_dir_component_cannot_be_folded_into_the_data_dir() {
         "{error}"
     );
 }
+
+const ACCOUNT_JAR: &str =
+    "# Netscape HTTP Cookie File\n.example.invalid\tTRUE\t/\tTRUE\t0\tsid\tsynthetic-account-cookie\n";
+
+fn youtube_accounts_fixture() -> Value {
+    json!({
+        "revision": 1,
+        "selected_id": "0123456789abcdef",
+        "accounts": [
+            {
+                "id": "0123456789abcdef",
+                "label": "手机",
+                "source": "cookies",
+                "cookies": ACCOUNT_JAR,
+                "count": 1,
+                "created_at": 1_791_702_240_u64,
+                "updated_at": 1_791_702_240_u64,
+            },
+            {
+                "id": "fedcba9876543210",
+                "label": "浏览器",
+                "source": "browser",
+                "browser": "chrome",
+                "profile": "Default",
+                "count": 0,
+                "created_at": 1_791_702_240_u64,
+                "updated_at": 1_791_702_240_u64,
+            },
+        ],
+    })
+}
+
+/// 账号文档必须进备份：整库备份少了它，恢复后 YouTube 账号与选中项全丢。
+#[test]
+fn backup_carries_youtube_accounts_and_restore_keeps_accounts_and_selection() {
+    let dir = Directory::new();
+    let store = dir.open().unwrap();
+    let accounts = youtube_accounts_fixture();
+    store.write("youtube-accounts.json", accounts.clone()).unwrap();
+
+    let database = store.data_dir().join(DB_FILE);
+    let mut stored = fs::read(&database).unwrap();
+    let wal = store.data_dir().join(format!("{DB_FILE}-wal"));
+    if let Ok(wal) = fs::read(&wal) {
+        stored.extend_from_slice(&wal);
+    }
+    assert!(
+        !String::from_utf8_lossy(&stored).contains("synthetic-account-cookie"),
+        "账号文档必须加密入库"
+    );
+
+    let backup = store.export_backup("synthetic-backup-password").unwrap();
+    let plain = crypto::restore("synthetic-backup-password", &backup).unwrap();
+    let docs: HashMap<String, Document> = serde_json::from_slice(&plain).unwrap();
+    assert_eq!(
+        docs["youtube-accounts.json"].value, accounts,
+        "备份必须带上 YouTube 账号"
+    );
+
+    let target_dir = Directory::new();
+    let target = target_dir.open().unwrap();
+    target
+        .restore_backup("synthetic-backup-password", &backup)
+        .unwrap();
+    let restored = target.read("youtube-accounts.json").unwrap().unwrap().value;
+    assert_eq!(restored, accounts, "恢复后账号列表与选中项必须还在");
+    assert_eq!(restored["selected_id"], json!("0123456789abcdef"));
+    assert_eq!(restored["accounts"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn youtube_accounts_document_validates_its_shape() {
+    use super::documents::validate;
+    validate("youtube-accounts.json", &youtube_accounts_fixture()).unwrap();
+    for broken in [
+        json!({"revision": 1, "selected_id": "gone", "accounts": []}),
+        json!({"revision": 1, "selected_id": null, "accounts": [{"id": "0123456789abcdef", "label": "手机", "source": "cookies", "count": 1, "created_at": 1, "updated_at": 1}]}),
+        json!({"revision": 1, "selected_id": null, "accounts": [{"id": "0123456789abcdef", "label": "", "source": "browser", "browser": "chrome", "count": 0, "created_at": 1, "updated_at": 1}]}),
+        json!({"revision": 1, "selected_id": null, "accounts": [{"id": "0123456789abcdef", "label": "手机", "source": "cookies", "cookies": ACCOUNT_JAR, "count": 2, "created_at": 1, "updated_at": 1}]}),
+        json!({"revision": 1, "selected_id": null, "accounts": "not-a-list"}),
+    ] {
+        assert!(
+            validate("youtube-accounts.json", &broken).is_err(),
+            "{broken}"
+        );
+    }
+}

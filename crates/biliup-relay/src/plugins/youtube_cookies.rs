@@ -239,6 +239,85 @@ fn accounts_from(value: Option<&Value>) -> io::Result<AccountsDoc> {
     })
 }
 
+/// 备份恢复用：整份账号文档的形状校验；任何一条不合法都整份拒收。
+pub fn validate_accounts(value: &Value) -> io::Result<()> {
+    let doc = accounts_from(Some(value))?;
+    if doc.accounts.len() > MAX_ACCOUNTS {
+        return Err(accounts_error(
+            "YouTube 账号数量超出上限",
+            io::ErrorKind::InvalidInput,
+        ));
+    }
+    let mut ids = HashSet::new();
+    for account in &doc.accounts {
+        if account.id.len() != 16
+            || !account.id.chars().all(|c| c.is_ascii_hexdigit())
+            || !ids.insert(account.id.as_str())
+        {
+            return Err(accounts_error(
+                "YouTube 账号标识无效或重复",
+                io::ErrorKind::InvalidInput,
+            ));
+        }
+        clean_text(&account.label, MAX_LABEL_CHARS, "账号名称")?;
+        match account.source.as_str() {
+            "browser" => {
+                let Some(browser) = account.browser.as_deref() else {
+                    return Err(accounts_error(
+                        "YouTube 账号缺少浏览器名",
+                        io::ErrorKind::InvalidInput,
+                    ));
+                };
+                clean_arg(browser, MAX_BROWSER_CHARS, "浏览器名")?;
+                if let Some(profile) = account.profile.as_deref() {
+                    clean_arg(profile, MAX_PROFILE_CHARS, "浏览器配置")?;
+                }
+                if account.cookies.is_some() {
+                    return Err(accounts_error(
+                        "YouTube 账号不能同时带 Cookie 与浏览器",
+                        io::ErrorKind::InvalidInput,
+                    ));
+                }
+            }
+            "cookies" => {
+                let Some(cookies) = account.cookies.as_deref() else {
+                    return Err(accounts_error(
+                        "YouTube 账号缺少 Cookie",
+                        io::ErrorKind::InvalidInput,
+                    ));
+                };
+                if validate_netscape(cookies)?.count != account.count {
+                    return Err(accounts_error(
+                        "YouTube 账号的 Cookie 条数与记录不一致",
+                        io::ErrorKind::InvalidInput,
+                    ));
+                }
+                if account.browser.is_some() || account.profile.is_some() {
+                    return Err(accounts_error(
+                        "YouTube 账号不能同时带 Cookie 与浏览器",
+                        io::ErrorKind::InvalidInput,
+                    ));
+                }
+            }
+            _ => {
+                return Err(accounts_error(
+                    "YouTube 账号来源类型无效",
+                    io::ErrorKind::InvalidInput,
+                ));
+            }
+        }
+    }
+    if let Some(selected) = doc.selected_id.as_deref() {
+        if !doc.accounts.iter().any(|account| account.id == selected) {
+            return Err(accounts_error(
+                "选中的 YouTube 账号不在列表里",
+                io::ErrorKind::InvalidInput,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn view_of(doc: &AccountsDoc) -> AccountsStatus {
     AccountsStatus {
         revision: doc.revision,

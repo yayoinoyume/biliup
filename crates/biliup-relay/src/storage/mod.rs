@@ -41,6 +41,7 @@ pub const NAMES: &[&str] = &[
     "channels.json",
     "areas.json",
     "cookies.txt",
+    "youtube-accounts.json",
     "invalid_words.txt",
     "youtube_quota.json",
     "youtube_golive_hours.json",
