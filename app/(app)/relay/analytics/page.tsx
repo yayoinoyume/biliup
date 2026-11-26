@@ -289,6 +289,7 @@ export default function RelayAnalyticsPage() {
         ) : null}
         {busy ? (
           <Banner
+            className={relay.banner}
             type="warning"
             title="统计查询繁忙"
             description="后端每个节点只允许两个并发统计查询，稍等片刻再刷新。"
@@ -297,6 +298,7 @@ export default function RelayAnalyticsPage() {
         ) : null}
         {statsTooLarge ? (
           <Banner
+            className={relay.banner}
             type="warning"
             title="统计结果过大"
             description={

@@ -407,6 +407,7 @@ export default function Wizard() {
         ) : null}
         {setup.data?.storage_error ? (
           <Banner
+            className={styles.banner}
             type="danger"
             closeIcon={null}
             title="数据存储不可用"
@@ -415,6 +416,7 @@ export default function Wizard() {
         ) : null}
         {setup.data && !setup.data.needs_setup && !setup.data.storage_error ? (
           <Banner
+            className={styles.banner}
             type="warning"
             closeIcon={null}
             title="首次配置已经完成"
@@ -444,6 +446,7 @@ export default function Wizard() {
               />
             ) : (
               <Banner
+                className={styles.banner}
                 type={loginCheckedIn ? 'success' : 'info'}
                 closeIcon={null}
                 title={loginCheckedIn ? 'B 站账号已登录' : '用 B 站客户端扫码登录'}
@@ -506,6 +509,7 @@ export default function Wizard() {
               </Title>
             </div>
             <Banner
+              className={styles.banner}
               type="info"
               closeIcon={null}
               title="后台登录与权限统一由 biliup 宿主账号管理"
@@ -791,6 +795,7 @@ export default function Wizard() {
 
             {savedMessage ? (
               <Banner
+                className={styles.banner}
                 type="success"
                 closeIcon={null}
                 title="首次配置已保存"

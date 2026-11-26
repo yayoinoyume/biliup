@@ -290,9 +290,10 @@ export default function CropModal({
       onCancel={onClose}
     >
       <div className={base.stack}>
-        {notice ? <Banner type={notice.type} closeIcon={null} description={notice.text} /> : null}
+        {notice ? <Banner className={base.banner} type={notice.type} closeIcon={null} description={notice.text} /> : null}
         {crop.error ? (
           <Banner
+            className={base.banner}
             type="danger"
             closeIcon={null}
             title="读取裁剪配置失败"

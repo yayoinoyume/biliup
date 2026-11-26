@@ -196,6 +196,7 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
           <>
             {savedUnavailable ? (
               <Banner
+                className={relayStyles.banner}
                 type="warning"
                 closeIcon={null}
                 title="当前选中的账号已不可用"

@@ -92,6 +92,7 @@ export function SaveErrorBanner({ error, onReload }: SaveErrorBannerProps) {
   const conflict = isConflictError(error)
   return (
     <Banner
+      className={relayStyles.banner}
       type={conflict ? 'warning' : 'danger'}
       closeIcon={null}
       title={conflict ? '配置已被其他操作修改' : '保存失败'}

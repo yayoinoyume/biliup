@@ -3,6 +3,7 @@
 import type { ReactNode } from 'react'
 import { Banner } from '@douyinfe/semi-ui'
 import { FormDialog } from '@/app/ui/shell'
+import styles from '@/app/ui/relay/relay.module.scss'
 
 export default function ConfirmDialog({
   visible,
@@ -29,7 +30,7 @@ export default function ConfirmDialog({
       onOk={onConfirm}
       onCancel={onCancel}
     >
-      <Banner type="warning" closeIcon={null} title="请确认" description={description} />
+      <Banner className={styles.banner} type="warning" closeIcon={null} title="请确认" description={description} />
     </FormDialog>
   )
 }

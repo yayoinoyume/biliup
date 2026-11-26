@@ -108,6 +108,7 @@ export default function RelayOverviewPage() {
         {setup.data?.needs_setup ? (
           canConfig ? (
             <Banner
+              className={styles.banner}
               type="warning"
               closeIcon={null}
               title="首次配置还没有完成"
@@ -126,6 +127,7 @@ export default function RelayOverviewPage() {
             />
           ) : (
             <Banner
+              className={styles.banner}
               type="info"
               closeIcon={null}
               title="转播底座尚未初始化"
@@ -134,7 +136,7 @@ export default function RelayOverviewPage() {
           )
         ) : null}
         {setup.data?.storage_error ? (
-          <Banner type="danger" closeIcon={null} title="数据存储不可用" description={setup.data.storage_error} />
+          <Banner className={styles.banner} type="danger" closeIcon={null} title="数据存储不可用" description={setup.data.storage_error} />
         ) : null}
         {setup.error ? (
           <RelayError

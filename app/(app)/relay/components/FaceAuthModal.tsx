@@ -47,6 +47,7 @@ export default function FaceAuthModal({
     >
       <div className={pageStyles.dialogBody}>
         <Banner
+          className={styles.banner}
           type="warning"
           closeIcon={null}
           title={message || 'B 站要求完成人脸验证后才能开播'}

@@ -182,6 +182,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
       >
         {ready && configured ? (
           <Banner
+            className={relayStyles.banner}
             type="warning"
             closeIcon={null}
             title="当前实例已存在配置，不能恢复备份"
