@@ -226,6 +226,7 @@ fn config_response(cfg: &Config) -> serde_json::Value {
     response["youtube_api_key_mask"] = json!(credential_mask(&cfg.youtube_api_keys().join("\n")));
     response["secret_revision"] = json!(crate::config::config_data_revision(cfg));
     response["account_id"] = json!(cfg.bililive.account_id);
+    response["account_mid"] = json!(cfg.bililive.account_mid);
     response
 }
 
@@ -367,7 +368,7 @@ impl HistoryPatch {
 }
 
 fn config_form_values(cfg: &Config) -> serde_json::Value {
-    json!({
+    let mut values = json!({
         "interval": cfg.interval,
         "auto_stop_after_source_end": cfg.auto_stop_after_source_end,
         "auto_stop_threshold_hours": cfg.auto_stop_threshold_hours,
@@ -378,7 +379,6 @@ fn config_form_values(cfg: &Config) -> serde_json::Value {
         "auto_cover": cfg.auto_cover,
         "enable_anti_collision": cfg.enable_anti_collision,
         "enable_danmaku_command": cfg.bililive.enable_danmaku_command,
-        "account_id": cfg.bililive.account_id,
         "holodex_monitor_gate": cfg.holodex_monitor_gate,
         "enable_lol_monitor": cfg.enable_lol_monitor,
         "lol_monitor_interval": cfg.lol_monitor_interval.unwrap_or(1),
@@ -409,7 +409,10 @@ fn config_form_values(cfg: &Config) -> serde_json::Value {
         "warning_hold_exempt": cfg.warning_hold_exempt,
         "warning_hold_exempt_reasons": cfg.warning_hold_exempt_reasons,
         "warning_hold_exempt_all_low_risk": cfg.warning_hold_exempt_all_low_risk,
-    })
+    });
+    values["account_id"] = json!(cfg.bililive.account_id);
+    values["account_mid"] = json!(cfg.bililive.account_mid);
+    values
 }
 
 /// 回调地址必须为空或 http(s)，回调端口必须是有效端口。
@@ -836,6 +839,7 @@ pub async fn update_config(
         cfg.bililive.enable_danmaku_command = enable_danmaku_command;
     }
     if let Some(account_id) = payload.account_id {
+        cfg.bililive.account_mid = account_id.and_then(crate::credential_bridge::account_mid);
         cfg.bililive.account_id = account_id;
     }
     if let Some(auto_stop_after_source_end) = payload.auto_stop_after_source_end {
@@ -1439,8 +1443,11 @@ mod tests {
         assert_eq!(config_response(&cfg)["account_id"], json!(null));
 
         cfg.bililive.account_id = Some(7);
+        cfg.bililive.account_mid = Some(100);
         assert_eq!(config_form_values(&cfg)["account_id"], json!(7));
+        assert_eq!(config_form_values(&cfg)["account_mid"], json!(100));
         assert_eq!(config_response(&cfg)["account_id"], json!(7));
+        assert_eq!(config_response(&cfg)["account_mid"], json!(100));
 
         let current = config_form_values(&cfg);
         let expected = HashMap::from([("account_id".into(), current["account_id"].clone())]);
@@ -1477,5 +1484,55 @@ mod tests {
                 assert!(!text.contains(leaked), "{leaked} leaked into {text}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn the_route_saves_the_chosen_account_and_falls_back_after_it_is_deleted() {
+        use crate::credential_bridge::testing;
+        let _storage = crate::storage::lock_test_global();
+        let _accounts = crate::credential_bridge::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            crate::storage::init(&dir.path().join("data"), Some(&dir.path().join("key"))).unwrap();
+        let mut seeded = crate::test_support::config("local", 0);
+        seeded.bililive.account_id = None;
+        seeded.bililive.account_mid = None;
+        store
+            .write("config.json", serde_json::to_value(&seeded).unwrap())
+            .unwrap();
+        testing::install([(
+            7,
+            testing::account_document(100, "synthetic-route-sessdata"),
+        )]);
+
+        let payload: UpdateConfigRequest =
+            serde_json::from_value(json!({"account_id": 7})).unwrap();
+        let response = update_config(Json(payload)).await.unwrap();
+        assert!(response.success, "{:?}", response.message);
+
+        let saved = crate::config::load_config().await.unwrap();
+        assert_eq!(saved.bililive.account_id, Some(7));
+        assert_eq!(saved.bililive.account_mid, Some(100), "保存时记下账号 mid");
+        assert_eq!(
+            saved.bililive.credentials.sessdata,
+            "synthetic-route-sessdata"
+        );
+
+        crate::credential_bridge::set_account_provider(None);
+        crate::config::accounts_changed();
+        let deleted = crate::config::load_config().await.unwrap();
+        assert!(
+            deleted.bililive.credentials.sessdata.is_empty(),
+            "账号删掉后不能再拿旧凭据"
+        );
+
+        let cleared: UpdateConfigRequest =
+            serde_json::from_value(json!({"account_id": null})).unwrap();
+        assert!(update_config(Json(cleared)).await.unwrap().success);
+        let unset = crate::config::load_config().await.unwrap();
+        assert_eq!(unset.bililive.account_id, None);
+        assert_eq!(unset.bililive.account_mid, None);
+
+        crate::storage::shutdown();
     }
 }

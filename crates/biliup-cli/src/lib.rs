@@ -628,10 +628,11 @@ pub fn install_relay_accounts(provider: Arc<SqliteAccountProvider>, pool: Connec
     let _ = RELAY_ACCOUNTS.set((provider, pool));
 }
 
-/// 登记或登录出新账号后刷新快照，不必重启服务。
+/// 登记或删除账号后刷新快照，并让转播丢掉旧配置快照。
 pub async fn refresh_relay_accounts() {
     if let Some((provider, pool)) = RELAY_ACCOUNTS.get() {
         provider.reload(pool).await;
+        biliup_relay::accounts_changed();
     }
 }
 

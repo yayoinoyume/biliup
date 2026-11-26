@@ -591,6 +591,9 @@ pub struct BiliLive {
     /// 选账号中心里的账号；`None` 表示继续用转播自己的 `cookies.json`。
     #[serde(default)]
     pub account_id: Option<i64>,
+    /// 保存时记下的账号 mid：行号被回收再分配给别的账号时靠它发现。
+    #[serde(default)]
+    pub account_mid: Option<u64>,
     #[serde(skip)]
     pub credentials: Credentials,
 }
@@ -603,6 +606,7 @@ impl std::fmt::Debug for BiliLive {
             .field("bili_rtmp_url", &self.bili_rtmp_url)
             .field("bili_rtmp_key", &secret(&self.bili_rtmp_key))
             .field("account_id", &self.account_id)
+            .field("account_mid", &self.account_mid)
             .field("credentials", &self.credentials)
             .finish()
     }
@@ -972,24 +976,41 @@ impl Credentials {
 }
 
 /// Loads credentials from the specified cookies.json file.
-async fn load_credentials(account_id: Option<i64>) -> Result<Credentials, Box<dyn Error>> {
-    if let Some(credentials) = selected_account_credentials(account_id) {
+async fn load_credentials(
+    account_id: Option<i64>,
+    account_mid: Option<u64>,
+) -> Result<Credentials, Box<dyn Error>> {
+    if let Some(credentials) = selected_account_credentials(account_id, account_mid) {
         return Ok(credentials);
     }
     let cookies_file: CookiesFile = crate::storage::read_document(COOKIES_DOCUMENT)?;
     Credentials::from_cookies(&cookies_file.cookie_info.cookies)
 }
 
-/// 选中的账号解析出的凭据；没选、账号不在、文档残缺都返回 `None` 让调用方回退。
-fn selected_account_credentials(account_id: Option<i64>) -> Option<Credentials> {
-    let document = crate::credential_bridge::account_document(account_id?)?;
-    match crate::credential_bridge::credentials_from_document(&document) {
-        Ok(credentials) => Some(credentials.into_config_credentials()),
+/// 选中的账号解析出的凭据；没选、账号不在、文档残缺、行号已指向别的账号都返回 `None`。
+fn selected_account_credentials(
+    account_id: Option<i64>,
+    account_mid: Option<u64>,
+) -> Option<Credentials> {
+    let id = account_id?;
+    let document = crate::credential_bridge::account_document(id)?;
+    let credentials = match crate::credential_bridge::credentials_from_document(&document) {
+        Ok(credentials) => credentials,
         Err(error) => {
-            tracing::warn!(%error, "选中账号的凭据不可用，回退到 cookies.json");
-            None
+            tracing::warn!(id, %error, "选中账号的凭据不可用，回退到 cookies.json");
+            return None;
         }
+    };
+    if credentials.mid != account_mid {
+        tracing::warn!(
+            id,
+            mid = credentials.mid,
+            saved_mid = account_mid,
+            "账号行号现在指向别的账号，回退到 cookies.json"
+        );
+        return None;
     }
+    Some(credentials.into_config_credentials())
 }
 
 /// 设置向导还没写过的配置文档：未配置态，不是故障。
@@ -1059,7 +1080,9 @@ fn config_from_documents(
         .and_then(|value| serde_json::from_value::<CookiesFile>(value.clone()).ok())
         .and_then(|file| Credentials::from_cookies(&file.cookie_info.cookies).ok())
         .unwrap_or_default();
-    if let Some(credentials) = selected_account_credentials(config.bililive.account_id) {
+    if let Some(credentials) =
+        selected_account_credentials(config.bililive.account_id, config.bililive.account_mid)
+    {
         config.bililive.credentials = credentials;
     }
     Ok(config)
@@ -1143,9 +1166,10 @@ async fn save_config_inner(
     })
     .await
     .map_err(|error| -> Box<dyn Error> { error.to_string().into() })??;
-    saved.bililive.credentials = load_credentials(saved.bililive.account_id)
-        .await
-        .unwrap_or(credentials);
+    saved.bililive.credentials =
+        load_credentials(saved.bililive.account_id, saved.bililive.account_mid)
+            .await
+            .unwrap_or(credentials);
     *config = saved;
     Ok(())
 }
@@ -1320,6 +1344,15 @@ where
     .map_err(|e| e.to_string())?;
     managed_document_committed();
     Ok(result)
+}
+
+/// 账号来源变了（登记、删除、重新登录）：丢掉配置快照，下次读配置重算凭据。
+pub fn accounts_changed() {
+    let _publication = CONFIG_PUBLICATION_LOCK
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    CONFIG_REVISION.fetch_add(1, Ordering::AcqRel);
+    invalidate_config_cache();
 }
 
 fn managed_document_committed() {
@@ -1559,6 +1592,7 @@ mod tests {
             bili_rtmp_url: String::new(),
             bili_rtmp_key: "synthetic-rtmp-key-c4e1".into(),
             account_id: None,
+            account_mid: None,
             credentials: credentials.clone(),
         };
         for text in [
@@ -2032,39 +2066,6 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    struct MockProvider(std::collections::HashMap<i64, serde_json::Value>);
-
-    impl biliup_accounts::AccountProvider for MockProvider {
-        fn list(&self) -> Vec<biliup_accounts::AccountMeta> {
-            self.0
-                .keys()
-                .map(|id| biliup_accounts::AccountMeta {
-                    id: *id,
-                    mid: 0,
-                    name: None,
-                })
-                .collect()
-        }
-
-        fn resolve(&self, id: i64) -> Option<serde_json::Value> {
-            self.0.get(&id).cloned()
-        }
-    }
-
-    static PROVIDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn account_document(sessdata: &str) -> serde_json::Value {
-        serde_json::json!({
-            "cookie_info": {"cookies": [
-                {"name": "SESSDATA", "value": sessdata},
-                {"name": "bili_jct", "value": "synthetic-account-csrf"},
-                {"name": "DedeUserID", "value": "synthetic-account-uid"},
-                {"name": "DedeUserID__ckMd5", "value": "synthetic-account-ckmd5"},
-            ]},
-            "token_info": {"access_token": "synthetic-account-token", "mid": 7u64},
-        })
-    }
-
     fn relay_cookies_document() -> serde_json::Value {
         serde_json::json!({
             "cookie_info": {"cookies": [
@@ -2076,46 +2077,89 @@ mod tests {
         })
     }
 
-    fn config_with_account(id: i64) -> serde_json::Value {
+    fn config_with_account(id: i64, mid: u64) -> serde_json::Value {
         let mut value = fixture_json();
         value["bililive"]["account_id"] = serde_json::json!(id);
+        value["bililive"]["account_mid"] = serde_json::json!(mid);
         value
+    }
+
+    struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = LogBuffer;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogBuffer(self.0.clone())
+        }
+    }
+
+    fn captured_log() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        impl tracing::Subscriber + Send + Sync + 'static,
+    ) {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(LogBuffer(buffer.clone()))
+            .with_ansi(false)
+            .finish();
+        (buffer, subscriber)
+    }
+
+    fn take_log(buffer: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(
+            buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn a_selected_account_replaces_the_relay_cookies_document() {
-        let _guard = PROVIDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut documents = std::collections::HashMap::new();
-        documents.insert(7, account_document("synthetic-account-sessdata"));
-        crate::credential_bridge::set_account_provider(Some(std::sync::Arc::new(MockProvider(
-            documents,
-        ))));
+        use crate::credential_bridge::testing;
+        let _guard = crate::credential_bridge::test_lock();
+        testing::install([(7, testing::account_document(100, "synthetic-account-sessdata"))]);
 
         let config = super::config_from_documents(
-            &config_with_account(7),
+            &config_with_account(7, 100),
             Some(&relay_cookies_document()),
         )
         .unwrap();
 
         assert_eq!(config.bililive.account_id, Some(7));
+        assert_eq!(config.bililive.account_mid, Some(100));
         assert_eq!(
             config.bililive.credentials.sessdata,
             "synthetic-account-sessdata"
         );
-        assert_eq!(
-            config.bililive.credentials.dede_user_id,
-            "synthetic-account-uid"
-        );
+        assert_eq!(config.bililive.credentials.dede_user_id, "100");
         crate::credential_bridge::set_account_provider(None);
     }
 
     #[test]
     fn a_missing_or_broken_account_falls_back_to_the_cookies_document() {
-        let _guard = PROVIDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use crate::credential_bridge::testing;
+        let _guard = crate::credential_bridge::test_lock();
 
         crate::credential_bridge::set_account_provider(None);
         let config = super::config_from_documents(
-            &config_with_account(7),
+            &config_with_account(7, 100),
             Some(&relay_cookies_document()),
         )
         .unwrap();
@@ -2124,13 +2168,12 @@ mod tests {
             "synthetic-file-sessdata"
         );
 
-        let mut documents = std::collections::HashMap::new();
-        documents.insert(8, serde_json::json!({"cookie_info": {"cookies": "broken"}}));
-        crate::credential_bridge::set_account_provider(Some(std::sync::Arc::new(MockProvider(
-            documents,
-        ))));
+        testing::install([(
+            8,
+            serde_json::json!({"cookie_info": {"cookies": "broken"}}),
+        )]);
         let config = super::config_from_documents(
-            &config_with_account(9),
+            &config_with_account(9, 900),
             Some(&relay_cookies_document()),
         )
         .unwrap();
@@ -2140,7 +2183,7 @@ mod tests {
         );
 
         let config = super::config_from_documents(
-            &config_with_account(8),
+            &config_with_account(8, 800),
             Some(&relay_cookies_document()),
         )
         .unwrap();
@@ -2152,15 +2195,98 @@ mod tests {
     }
 
     #[test]
+    fn a_reused_row_number_falls_back_and_warns_without_the_credentials() {
+        use crate::credential_bridge::testing;
+        let _guard = crate::credential_bridge::test_lock();
+        testing::install([(
+            7,
+            testing::account_document(200, "synthetic-other-sessdata"),
+        )]);
+
+        let (buffer, subscriber) = captured_log();
+        let config = {
+            let _captured = tracing::subscriber::set_default(subscriber);
+            super::config_from_documents(
+                &config_with_account(7, 100),
+                Some(&relay_cookies_document()),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            config.bililive.credentials.sessdata,
+            "synthetic-file-sessdata"
+        );
+        let log = take_log(&buffer);
+        assert!(log.contains("行号现在指向别的账号"), "{log}");
+        assert!(log.contains("id=7"), "{log}");
+        assert!(!log.contains("synthetic-other-sessdata"), "{log}");
+        crate::credential_bridge::set_account_provider(None);
+    }
+
+    #[tokio::test]
+    async fn a_changed_account_invalidates_the_cached_credentials() {
+        use crate::credential_bridge::testing;
+        let _storage = crate::storage::lock_test_global();
+        let _guard = crate::credential_bridge::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            crate::storage::init(&dir.path().join("data"), Some(&dir.path().join("key"))).unwrap();
+        testing::install([(7, testing::account_document(100, "synthetic-account-one"))]);
+        let mut seeded = crate::test_support::config("local", 0);
+        seeded.bililive.account_id = Some(7);
+        seeded.bililive.account_mid = Some(100);
+        store
+            .write("config.json", serde_json::to_value(&seeded).unwrap())
+            .unwrap();
+        store.write("cookies.json", relay_cookies_document()).unwrap();
+
+        let first = super::load_config().await.unwrap();
+        assert_eq!(
+            first.bililive.credentials.sessdata,
+            "synthetic-account-one"
+        );
+        assert!(super::config_is_current(&first));
+
+        testing::install([(7, testing::account_document(100, "synthetic-account-two"))]);
+        let cached = super::load_config().await.unwrap();
+        assert_eq!(
+            cached.bililive.credentials.sessdata,
+            "synthetic-account-one",
+            "账号换了但没人通知，读到的还是旧凭据"
+        );
+
+        let stale = cached.clone();
+        super::accounts_changed();
+        assert!(!super::config_is_current(&stale));
+        let refreshed = super::load_config().await.unwrap();
+        assert_eq!(
+            refreshed.bililive.credentials.sessdata,
+            "synthetic-account-two"
+        );
+
+        crate::credential_bridge::set_account_provider(None);
+        super::accounts_changed();
+        let removed = super::load_config().await.unwrap();
+        assert_eq!(
+            removed.bililive.credentials.sessdata,
+            "synthetic-file-sessdata",
+            "账号删掉后要回退到 relay 自己的 cookies.json"
+        );
+
+        crate::storage::shutdown();
+    }
+
+    #[test]
     fn a_config_without_account_id_still_loads_and_defaults_to_null() {
         let mut value = fixture_json();
-        value["bililive"]
-            .as_object_mut()
-            .unwrap()
-            .remove("account_id");
+        let bililive = value["bililive"].as_object_mut().unwrap();
+        bililive.remove("account_id");
+        bililive.remove("account_mid");
 
         let config = super::config_from_documents(&value, None).unwrap();
         assert_eq!(config.bililive.account_id, None);
+        assert_eq!(config.bililive.account_mid, None);
         assert_eq!(config.interval, 15);
 
         let with_defaults = super::config_json_with_defaults(value).unwrap();
@@ -2168,5 +2294,10 @@ mod tests {
             with_defaults["bililive"]["account_id"],
             serde_json::Value::Null
         );
+        assert_eq!(
+            with_defaults["bililive"]["account_mid"],
+            serde_json::Value::Null
+        );
     }
+
 }

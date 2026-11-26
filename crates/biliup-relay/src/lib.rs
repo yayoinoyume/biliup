@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-pub use config::{load_config, Config};
+pub use config::{accounts_changed, load_config, Config};
 pub use credential_bridge::{
     load_credentials, RelayBiliAccountSource, RelayBiliCredentials, RelayBiliCredentialsError,
 };
@@ -586,6 +586,7 @@ mod tests {
     #[tokio::test]
     async fn start_opens_the_encrypted_store_and_shutdown_is_idempotent() {
         let _guard = storage::lock_test_global();
+        let _accounts = credential_bridge::test_lock();
         let dir = tempfile::tempdir().unwrap();
         let relay = RelayService::new();
         let key_file = dir.path().join("keys/master.key");
@@ -659,6 +660,7 @@ mod tests {
     #[tokio::test]
     async fn background_workers_start_and_stop_with_the_service() {
         let _store = storage::lock_test_global();
+        let _accounts = credential_bridge::test_lock();
         let dir = tempfile::tempdir().unwrap();
         let cfg = RelayInitConfig {
             data_dir: dir.path().join("relay"),
@@ -685,6 +687,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_resets_the_webui_port_registration() {
         let _guard = storage::lock_test_global();
+        let _accounts = credential_bridge::test_lock();
         let dir = tempfile::tempdir().unwrap();
         let relay = RelayService::new();
         relay
@@ -707,6 +710,7 @@ mod tests {
     }
 
     async fn boot_relay_for_monitor() -> (tempfile::TempDir, RelayService) {
+        let _accounts = credential_bridge::test_lock();
         let dir = tempfile::tempdir().unwrap();
         let relay = RelayService::new();
         relay

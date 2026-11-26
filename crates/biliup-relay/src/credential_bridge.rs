@@ -33,9 +33,73 @@ pub fn account_provider() -> Option<Arc<dyn AccountProvider>> {
         .clone()
 }
 
-/// 按登记行号取账号凭据文档；没注入来源或账号不存在都是 `None`。
+/// 按登记行号取账号凭据文档；没注入来源或账号不存在各警告一次（只有 id）。
 pub fn account_document(id: i64) -> Option<Value> {
-    account_provider()?.resolve(id)
+    let Some(provider) = account_provider() else {
+        tracing::warn!(id, "宿主没有注入账号来源，选中的账号用不了，回退到 cookies.json");
+        return None;
+    };
+    let document = provider.resolve(id);
+    if document.is_none() {
+        tracing::warn!(id, "选中的账号不在账号来源里，回退到 cookies.json");
+    }
+    document
+}
+
+/// 账号文档里的 mid，用来确认行号仍然指向同一个账号。
+pub fn account_mid(id: i64) -> Option<u64> {
+    credentials_from_document(&account_document(id)?).ok()?.mid
+}
+
+/// 改动进程级账号来源的测试共用的锁：`RelayService::start` 也会写这个槽位。
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use std::sync::Arc;
+
+    pub(crate) struct MockProvider(pub(crate) std::collections::HashMap<i64, Value>);
+
+    impl AccountProvider for MockProvider {
+        fn list(&self) -> Vec<biliup_accounts::AccountMeta> {
+            self.0
+                .keys()
+                .map(|id| biliup_accounts::AccountMeta {
+                    id: *id,
+                    mid: 0,
+                    name: None,
+                })
+                .collect()
+        }
+
+        fn resolve(&self, id: i64) -> Option<Value> {
+            self.0.get(&id).cloned()
+        }
+    }
+
+    /// 装入一组合成账号文档；用完由调用方 `set_account_provider(None)` 收尾。
+    pub(crate) fn install(documents: impl IntoIterator<Item = (i64, Value)>) {
+        set_account_provider(Some(Arc::new(MockProvider(
+            documents.into_iter().collect(),
+        ))));
+    }
+
+    pub(crate) fn account_document(mid: u64, sessdata: &str) -> Value {
+        serde_json::json!({
+            "cookie_info": {"cookies": [
+                {"name": "SESSDATA", "value": sessdata},
+                {"name": "bili_jct", "value": "synthetic-account-csrf"},
+                {"name": "DedeUserID", "value": mid.to_string()},
+                {"name": "DedeUserID__ckMd5", "value": "synthetic-account-ckmd5"},
+            ]},
+            "token_info": {"access_token": "synthetic-account-token", "mid": mid},
+        })
+    }
 }
 
 /// 转播引擎读取 B 站账号的两条来源。

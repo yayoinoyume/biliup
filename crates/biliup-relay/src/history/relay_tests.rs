@@ -25,6 +25,7 @@ fn seed(room: i32) -> Config {
 
 /// 先建库写配置，再启动服务：统计引擎在 start 时读取同一份配置。
 async fn boot(room: i32) -> (Harness, RelayService) {
+    let _accounts = crate::credential_bridge::test_lock();
     let dir = tempfile::tempdir().expect("临时目录");
     let data_dir = dir.path().join("relay");
     let key_file = dir.path().join("keys/master.key");
@@ -47,6 +48,7 @@ async fn boot(room: i32) -> (Harness, RelayService) {
 
 /// 同进程、同一数据目录再启动一次服务。
 async fn restart(init: &RelayInitConfig) -> RelayService {
+    let _accounts = crate::credential_bridge::test_lock();
     let relay = RelayService::new();
     relay.start(init.clone()).await.expect("同目录重启应成功");
     relay

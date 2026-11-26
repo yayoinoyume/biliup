@@ -1083,6 +1083,7 @@ pub async fn delete_user_endpoint(
     let deleted = delete_bilibili_cookie(&pool, id)
         .await
         .map_err(report_to_response)?;
+    crate::refresh_relay_accounts().await;
     info!(
         user_id = deleted.id,
         file_deleted = deleted.file_deleted,
@@ -1118,7 +1119,6 @@ pub async fn login_by_qrcode(
     let filename = save_qrcode_login(std::path::Path::new("data"), &info)
         .await
         .map_err(report_to_response)?;
-    crate::refresh_relay_accounts().await;
 
     Ok(Json(json!({ "filename": filename })))
 }
