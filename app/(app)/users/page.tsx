@@ -61,7 +61,7 @@ async function call(method: string, url: string, body?: unknown) {
     body: body === undefined ? undefined : JSON.stringify(body),
   })
   if (res.status === 401) {
-    window.location.assign(`/login?next=${encodeURIComponent(window.location.pathname)}`)
+    window.location.href = window.location.origin + '/login?next=' + encodeURIComponent(window.location.pathname)
     throw new Error('登录已失效')
   }
   // 自己的用户管理权限被收回了：刷新权限点，页面随之换成无权限提示
@@ -397,7 +397,7 @@ export default function UsersPage() {
     <>
       <PageHeader
         icon={<IconUserGroup size="large" />}
-        title="用户管理"
+        title="登录用户与权限"
         actions={
           <Button
             icon={<IconPlusCircle />}

@@ -30,7 +30,7 @@ function errorText(e: any): string {
  * 添加 B 站账号：内容少，用居中小弹窗（从账号抽屉里打开，最多叠这一层）。
  * 默认「Cookie 文件」：改造前的第一项、内容最少（一个输入框），打开时也不会先去 B 站拉二维码
  */
-function AddAccountDialog({ onClose, onAdd }: { onClose: () => void; onAdd: (value: string) => Promise<boolean> }) {
+export function AddAccountDialog({ onClose, onAdd }: { onClose: () => void; onAdd: (value: string) => Promise<boolean> }) {
   const [method, setMethod] = useState<Method>('cookie')
   const api = useRef<FormApi>(undefined)
   const busy = useRef(false)
