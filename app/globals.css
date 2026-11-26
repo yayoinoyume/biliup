@@ -68,3 +68,50 @@ body::-webkit-scrollbar-thumb:hover, html::-webkit-scrollbar-thumb:hover {
 .semi-navigation-header-logo {
     width: fit-content !important;
 }
+
+/* 统一 Semi Banner 排版：覆盖各页面裸用 Banner 的默认标题/说明/内边距。
+   只改排版与字号，不改颜色、图标和语义。 */
+.semi-banner.semi-banner {
+  padding: 12px 16px;
+}
+
+.semi-banner.semi-banner .semi-banner-content-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.semi-banner.semi-banner .semi-banner-content-body .semi-banner-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.semi-banner.semi-banner .semi-banner-content-body .semi-banner-description {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.semi-banner.semi-banner.semi-banner .semi-banner-content-body .semi-banner-title + .semi-banner-description {
+  margin-top: 0;
+}
+
+.semi-banner.semi-banner .semi-banner-description .semi-typography {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.semi-banner.semi-banner .semi-banner-description a {
+  font-size: 12px;
+}
+
+.semi-banner.semi-banner.semi-banner-full .semi-banner-content-wrapper .semi-banner-content {
+  justify-content: flex-start;
+}
+
+.semi-banner.semi-banner.semi-banner-full .semi-banner-content-wrapper .semi-banner-content-body {
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+}
