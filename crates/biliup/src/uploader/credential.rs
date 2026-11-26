@@ -85,17 +85,20 @@ fn is_encrypted_target(path: &Path) -> std::io::Result<bool> {
 
 fn configured_cipher() -> Result<Cipher> {
     Cipher::from_env()?.ok_or_else(|| {
-        Kind::Custom("凭据密钥未配置：请设置 BILIUP_ACCOUNT_KEY_FILE 指向密钥文件".into())
+        Kind::IO(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "凭据密钥未配置：请设置 BILIUP_ACCOUNT_KEY_FILE 指向密钥文件",
+        ))
     })
 }
 
 /// 读一份凭据文件：明文 JSON 直接解析，`BUPACC` 开头的按 `BILIUP_ACCOUNT_KEY_FILE` 的密钥解密。
+/// 密文失败保留 io 错误类别（密钥缺失 NotFound、权限 PermissionDenied、解不开 InvalidData），
+/// 调用方据此给用户可区分的提示。
 pub fn load_login_info(path: &Path) -> Result<LoginInfo> {
     let bytes = Zeroizing::new(std::fs::read(path)?);
     let plaintext = if biliup_accounts::is_ciphertext(&bytes) {
-        configured_cipher()?
-            .open(&bytes)
-            .map_err(|error| Kind::Custom(error.to_string()))?
+        configured_cipher()?.open(&bytes)?
     } else {
         bytes
     };

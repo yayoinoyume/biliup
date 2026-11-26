@@ -13,17 +13,28 @@ use tracing::{debug, warn};
 
 static UNSUPPORTED_CIPHERTEXT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-/// 密文不做同步，但也不能静默丢账号：同一个文件只警告一次，Fleet 心跳每 10 秒扫一遍。
-pub(crate) fn warn_ciphertext_once(path: &str, message: &'static str) {
-    let known = UNSUPPORTED_CIPHERTEXT.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut known = known
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if known.insert(format!("{message}:{path}")) {
-        warn!(path = %path, "{message}");
-    } else {
-        debug!(path = %path, "{message}");
+/// 读一份登记凭据的明文文本。密文不做同步，但也不能静默丢账号：同一个文件只警告一次
+/// （Fleet 心跳每 10 秒扫一遍），然后返回 `None`。
+///
+/// 先看字节再转字符串：真实密文是非 UTF-8 二进制，先 `read_to_string` 会在魔法判断之前就失败。
+pub(crate) fn plaintext_credential(
+    path: &str,
+    bytes: Vec<u8>,
+    unsupported: &'static str,
+) -> Option<String> {
+    if biliup_accounts::is_ciphertext(&bytes) {
+        let known = UNSUPPORTED_CIPHERTEXT.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut known = known
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if known.insert(format!("{unsupported}:{path}")) {
+            warn!(path = %path, "{unsupported}");
+        } else {
+            debug!(path = %path, "{unsupported}");
+        }
+        return None;
     }
+    String::from_utf8(bytes).ok()
 }
 
 /// 本机的一个账号与它的凭据文件
@@ -78,17 +89,16 @@ pub async fn scan(pool: &ConnectionPool) -> Vec<LocalAccount> {
     };
     let mut accounts: Vec<LocalAccount> = Vec::new();
     for path in paths {
-        let Ok(text) = tokio::fs::read_to_string(Path::new(&path)).await else {
+        let Ok(bytes) = tokio::fs::read(Path::new(&path)).await else {
             continue;
         };
-        // 密文不做同步：静默跳过会让账号在节点上凭空消失，这里必须明说
-        if biliup_accounts::is_ciphertext(text.as_bytes()) {
-            warn_ciphertext_once(
-                &path,
-                "B 站账号凭据是加密文件，Fleet 账号上报不支持密文，这回不报这个账号",
-            );
+        let Some(text) = plaintext_credential(
+            &path,
+            bytes,
+            "B 站账号凭据是加密文件，Fleet 账号上报不支持密文，这回不报这个账号",
+        ) else {
             continue;
-        }
+        };
         let Some((mid, uname)) = parse_credential(&text) else {
             continue;
         };
@@ -105,8 +115,75 @@ pub fn public(accounts: &[LocalAccount]) -> Vec<Account> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
+        type Writer = CapturedLog;
+
+        fn make_writer(&'a self) -> CapturedLog {
+            CapturedLog(self.0.clone())
+        }
+    }
+
+    /// 本轮测试线程上的日志收集器：返回共享缓冲与订阅者，用 `tracing::subscriber::set_default` 装上
+    pub(crate) fn captured_log() -> (
+        Arc<Mutex<Vec<u8>>>,
+        impl tracing::Subscriber + Send + Sync + 'static,
+    ) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(LogWriter(buffer.clone()))
+            .with_ansi(false)
+            .finish();
+        (buffer, subscriber)
+    }
+
+    pub(crate) fn take_log(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(
+            buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    /// 真实密文：`BUPACC1` 头 + 12 字节 nonce + 随机二进制负载，绝不是 ASCII
+    pub(crate) fn encrypted_credential(dir: &Path, mid: u64) -> (PathBuf, Vec<u8>) {
+        let store =
+            biliup_accounts::AccountStore::open(dir, Some(&dir.join("accounts.key"))).unwrap();
+        let path = store
+            .save(mid, &serde_json::json!({ "token_info": { "mid": mid } }))
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"BUPACC1"));
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "密文必须是二进制，不能用 ASCII 假密文"
+        );
+        (path, bytes)
+    }
 
     #[test]
     fn mid_comes_from_token_info_and_the_rest_is_ignored() {
@@ -144,8 +221,7 @@ mod tests {
         let broken = write("c.json", serde_json::json!({ "cookie_info": {} }));
         let other = write("d.json", serde_json::json!({ "token_info": { "mid": 7 } }));
         let missing = dir.path().join("gone.json").to_string_lossy().into_owned();
-        let encrypted = dir.path().join("e.json.enc");
-        std::fs::write(&encrypted, b"BUPACC1synthetic-ciphertext").unwrap();
+        let (encrypted, _) = encrypted_credential(dir.path(), 99);
         let encrypted = encrypted.to_string_lossy().into_owned();
         for path in [&first, &duplicate, &broken, &missing, &other, &encrypted] {
             sqlx::query("INSERT INTO configuration (key, value) VALUES ('bilibili-cookies', ?)")
@@ -175,5 +251,41 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn binary_ciphertext_credentials_warn_once_and_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, bytes) = encrypted_credential(dir.path(), 42);
+        // 先 `read_to_string` 会在魔法判断之前就失败，所以这里真的不能是 UTF-8
+        assert!(std::str::from_utf8(&bytes).is_err());
+        let path = path.to_string_lossy().into_owned();
+        let pool = crate::server::infrastructure::connection_pool::ConnectionManager::new_pool(
+            dir.path().join("data.sqlite3").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO configuration (key, value) VALUES ('bilibili-cookies', ?1)")
+            .bind(&path)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (buffer, subscriber) = captured_log();
+        {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            assert!(scan(&pool).await.is_empty(), "密文账号不能当明文上报");
+        }
+        let log = take_log(&buffer);
+        assert!(log.contains("不支持密文"), "{log}");
+        assert!(log.contains(&path), "警告里要带路径：{log}");
+
+        // 同一个文件只警告一次：第二次扫描只剩 debug，默认级别收不到
+        let (buffer, subscriber) = captured_log();
+        {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            assert!(scan(&pool).await.is_empty());
+        }
+        assert!(!take_log(&buffer).contains("不支持密文"));
     }
 }

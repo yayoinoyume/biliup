@@ -157,17 +157,16 @@ async fn registered(services: &ServiceRegister) -> Vec<Registered> {
     .unwrap_or_default();
     let mut found: Vec<Registered> = Vec::new();
     for (id, path) in rows {
-        let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        let Ok(bytes) = tokio::fs::read(&path).await else {
             continue;
         };
-        // 密文不做同步：静默跳过会让账号在对端凭空消失，这里必须明说
-        if biliup_accounts::is_ciphertext(text.as_bytes()) {
-            crate::server::fleet::accounts::warn_ciphertext_once(
-                &path,
-                "配对同步：B 站账号凭据是加密文件，HA 账号同步不支持密文，跳过这个账号",
-            );
+        let Some(text) = crate::server::fleet::accounts::plaintext_credential(
+            &path,
+            bytes,
+            "配对同步：B 站账号凭据是加密文件，HA 账号同步不支持密文，跳过这个账号",
+        ) else {
             continue;
-        }
+        };
         let Some((mid, _)) = crate::server::fleet::accounts::parse_credential(&text) else {
             continue;
         };
@@ -1283,6 +1282,32 @@ pub(crate) mod tests {
         assert!(config.douyu_cookie.is_none());
         assert!(config.douyu_ltp0.is_none());
         assert!(config.douyu_refresh_device_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_credential_is_skipped_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let services = services(dir.path()).await;
+        let (path, bytes) =
+            crate::server::fleet::accounts::tests::encrypted_credential(dir.path(), 7);
+        assert!(std::str::from_utf8(&bytes).is_err());
+        let path = path.to_string_lossy().into_owned();
+        sqlx::query("INSERT INTO configuration (key, value) VALUES ('bilibili-cookies', ?1)")
+            .bind(&path)
+            .execute(&services.pool)
+            .await
+            .unwrap();
+
+        let (buffer, subscriber) = crate::server::fleet::accounts::tests::captured_log();
+        let found = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            registered(&services).await
+        };
+
+        assert!(found.is_empty(), "密文账号不能进配对同步列表");
+        let log = crate::server::fleet::accounts::tests::take_log(&buffer);
+        assert!(log.contains("不支持密文"), "{log}");
+        assert!(log.contains(&path), "{log}");
     }
 
     #[tokio::test]

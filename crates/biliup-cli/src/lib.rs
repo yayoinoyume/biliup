@@ -149,15 +149,27 @@ pub async fn serve_on(
         Err(e) => tracing::warn!(error = %e, "标记投稿结果未知的切片失败"),
     }
 
-    // 旧版账号是 `data/<mid>.json` 明文：先迁成密文并把两张表里的引用改成新路径，
+    // 凭据密钥：`BILIUP_ACCOUNT_KEY_FILE` 优先，否则 `data/accounts.key`；统一落成绝对路径并设回
+    // 环境变量，供后续 credential.rs 的读写（含扫码登录）找同一把密钥。
+    let account_key = resolve_account_key();
+
+    // 旧版账号是 `data/<mid>.json` 明文：逐账号迁成密文并把两张表里的引用改成新路径，
     // 迁不动只警告——账号读不了不该连累录制与上传启动。
     match repositories::migrate_plaintext_accounts(
         &conn_pool,
         Path::new("data"),
         Path::new("data/.backups"),
+        &account_key,
+        None,
     )
     .await
     {
+        Ok(report) if report.failed > 0 => tracing::warn!(
+            migrated = report.migrated,
+            repointed = report.repointed,
+            failed = report.failed,
+            "有旧版明文 B 站账号没迁完，明文已保留，下次启动会重试"
+        ),
         Ok(report) if report.migrated > 0 || report.repointed > 0 => tracing::info!(
             migrated = report.migrated,
             repointed = report.repointed,
@@ -247,6 +259,25 @@ pub async fn serve_on(
     .await
     .attach("could not initialize application routes")?;
     Ok(())
+}
+
+/// 账号密钥：`BILIUP_ACCOUNT_KEY_FILE` 优先，否则 `data/accounts.key`。
+///
+/// 落成绝对路径后设回环境变量，`credential.rs` 的 `Cipher::from_env` 与扫码登录都读它；
+/// 启动期调用，之后只读。
+fn resolve_account_key() -> PathBuf {
+    let configured = std::env::var_os(biliup_accounts::KEY_FILE_ENV).map(PathBuf::from);
+    let fallback = PathBuf::from("data/accounts.key");
+    let Ok(path) =
+        std::path::absolute(configured.clone().unwrap_or_else(|| fallback.clone()))
+    else {
+        tracing::warn!("B 站凭据密钥路径无法解析为绝对路径，加密账号的读写会失败");
+        return configured.unwrap_or(fallback);
+    };
+    if configured.is_none() {
+        unsafe { std::env::set_var(biliup_accounts::KEY_FILE_ENV, &path) };
+    }
+    path
 }
 
 fn validate_server_exposure(addr: SocketAddr, auth: bool) -> AppResult<()> {

@@ -13,6 +13,7 @@ use ormlite::{Insert, Model};
 use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 根据ID获取直播主播信息
 ///
@@ -290,12 +291,8 @@ pub async fn register_bilibili_cookie(
     // Registration confers permission to read and eventually delete this file,
     // so require it to actually be a supported credential document.
     if let Err(error) = biliup::uploader::credential::load_login_info(&cookie_file) {
-        return Err(
-            Report::new(AppError::Custom("无效的 B 站凭据文件".into())).attach(format!(
-                "read cookie file {}: {error}",
-                cookie_file.display()
-            )),
-        );
+        return Err(credential_registration_error(error)
+            .attach(format!("read cookie file {}", cookie_file.display())));
     }
 
     let cookie_path = cookie_file.to_string_lossy().into_owned();
@@ -325,108 +322,203 @@ pub async fn register_bilibili_cookie(
         .change_context(AppError::Unknown)
 }
 
-/// 一次启动迁移的结果：迁成密文的账号数、两张表里改成新路径的行数
+/// 注册凭据失败时给用户看的原因：密钥缺失/权限/解不开要和“文件不是凭据”分开，
+/// 且消息里不带路径、密钥或凭据内容。
+fn credential_registration_error(error: biliup::error::Kind) -> Report<AppError> {
+    let message = match &error {
+        biliup::error::Kind::IO(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            "B 站凭据密钥缺失：请恢复 accounts.key 后重启服务"
+        }
+        biliup::error::Kind::IO(io) if io.kind() == std::io::ErrorKind::PermissionDenied => {
+            "B 站凭据密钥权限不安全：需要仅运行账号可读写（600）"
+        }
+        biliup::error::Kind::IO(io) if io.kind() == std::io::ErrorKind::InvalidData => {
+            "B 站凭据解不开：密钥不匹配或文件已损坏"
+        }
+        _ => "无效的 B 站凭据文件",
+    };
+    Report::new(AppError::Custom(message.into())).attach(error.to_string())
+}
+
+/// 一次启动迁移的结果：迁完（明文已进备份）的账号数、两张表里改成新路径的行数、没迁完的账号数
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AccountMigration {
     pub migrated: usize,
     pub repointed: usize,
+    pub failed: usize,
 }
 
-/// 把 `data/*.json` 里的旧明文账号迁成 `data/accounts/{mid}.json.enc`，并在**同一个事务**里把
-/// `configuration.value` 与 `uploadstreamers.user_cookie` 里的旧路径改成新路径。
+/// 把 `data/*.json` 里的旧明文账号迁成 `data/accounts/{mid}.json.enc`。
+///
+/// 每个账号单独走三步：`AccountStore::save` 写密文 → 同一个事务里把 `configuration.value` 与
+/// `uploadstreamers.user_cookie` 改成新路径 → 提交成功后才把明文移进 `backup_root`。
+/// 任一步失败就保留明文、记一次 warn、继续下一个账号；下次启动会重试，库里的路径不会指向
+/// 已经挪进备份的文件。密钥路径由调用方显式给出，不读全局环境变量。
 ///
 /// 只扫 `data/` 顶层：CLI 命令行默认的凭据文件在工作目录根下，不在这里，它的明文读取路径保持不变。
+///
+/// 为了 `tests/account_migration.rs` 这个外部测试目标才公开，别的 crate 不要依赖。
+#[doc(hidden)]
 pub async fn migrate_plaintext_accounts(
     pool: &ConnectionPool,
     data_dir: &Path,
     backup_root: &Path,
+    key_path: &Path,
+    server_root: Option<&Path>,
 ) -> AppResult<AccountMigration> {
-    let store = AccountStore::open(data_dir, None)
+    let store = AccountStore::open(data_dir, Some(key_path))
         .change_context(AppError::Unknown)
         .attach_with(|| format!("open account store {}", data_dir.display()))?;
-    // 之后 credential.rs 的读写都按这个环境变量找密钥，必须是绝对路径。
-    // 启动期调用，此时还没有其他线程在读写环境变量。
-    if std::env::var_os(biliup_accounts::KEY_FILE_ENV).is_none() {
-        let key =
-            std::path::absolute(data_dir.join("accounts.key")).change_context(AppError::Unknown)?;
-        unsafe { std::env::set_var(biliup_accounts::KEY_FILE_ENV, key) };
-    }
-
-    // 先记下迁移前的明文与其目标：`migrate_plaintext` 只报告它新建的密文，
-    // 目标已存在时那行登记也要改路径，否则旧路径会指向被移进备份的文件。
-    let candidates = plaintext_accounts(data_dir);
-    let migrated = store
-        .migrate_plaintext(backup_root)
-        .change_context(AppError::Unknown)
-        .attach_with(|| format!("migrate plaintext accounts in {}", data_dir.display()))?;
-
-    let mut repoints: Vec<(PathBuf, String)> = Vec::new();
-    for (mid, source) in candidates {
-        let dest = store.path_for(mid);
-        if !dest.is_file() {
+    let server_root = match server_root {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().change_context(AppError::Unknown)?,
+    };
+    let mut report = AccountMigration::default();
+    let mut backup: Option<PathBuf> = None;
+    for (mid, source, value) in plaintext_accounts(data_dir) {
+        if let Err(error) = store.save(mid, &value) {
+            tracing::warn!(
+                mid,
+                path = %source.display(),
+                %error,
+                "写不了 B 站账号的密文文件，保留明文等下次启动重试"
+            );
+            report.failed += 1;
             continue;
         }
-        let Ok(dest) = normalize_credential_path(&dest) else {
+        let Ok(dest) = normalize_credential_path(store.path_for(mid)) else {
+            tracing::warn!(
+                mid,
+                path = %source.display(),
+                "密文路径无法规范化，保留明文等下次启动重试"
+            );
+            report.failed += 1;
             continue;
         };
-        repoints.push((source, dest.to_string_lossy().into_owned()));
+        match repoint_account(pool, &server_root, &source, &dest).await {
+            Ok(rows) => report.repointed += rows,
+            Err(error) => {
+                tracing::warn!(
+                    mid,
+                    path = %source.display(),
+                    %error,
+                    "改不了 B 站账号的登记路径，保留明文等下次启动重试"
+                );
+                report.failed += 1;
+                continue;
+            }
+        }
+        match move_to_backup(&mut backup, backup_root, &source) {
+            Ok(()) => report.migrated += 1,
+            Err(error) => {
+                tracing::warn!(
+                    mid,
+                    path = %source.display(),
+                    %error,
+                    "明文挪不进备份目录，下次启动重试"
+                );
+                report.failed += 1;
+            }
+        }
     }
+    Ok(report)
+}
 
-    let mut repointed = 0;
-    if !repoints.is_empty() {
-        let server_root = std::env::current_dir().change_context(AppError::Unknown)?;
-        let mut tx = pool.begin().await.change_context(AppError::Unknown)?;
-        let mut references: Vec<String> =
-            sqlx::query_scalar("SELECT value FROM configuration WHERE key = 'bilibili-cookies'")
-                .fetch_all(&mut *tx)
-                .await
-                .change_context(AppError::Unknown)?;
-        let cookies: Vec<String> = sqlx::query_scalar(
-            "SELECT user_cookie FROM uploadstreamers WHERE user_cookie IS NOT NULL",
+/// 在**一个事务**里把两张表里指向 `source` 的登记改成 `dest`，返回改到的行数。
+async fn repoint_account(
+    pool: &ConnectionPool,
+    server_root: &Path,
+    source: &Path,
+    dest: &Path,
+) -> AppResult<usize> {
+    let dest = dest.to_string_lossy().into_owned();
+    let mut tx = pool.begin().await.change_context(AppError::Unknown)?;
+    let mut references: Vec<String> =
+        sqlx::query_scalar("SELECT value FROM configuration WHERE key = 'bilibili-cookies'")
+            .fetch_all(&mut *tx)
+            .await
+            .change_context(AppError::Unknown)?;
+    let cookies: Vec<String> =
+        sqlx::query_scalar("SELECT user_cookie FROM uploadstreamers WHERE user_cookie IS NOT NULL")
+            .fetch_all(&mut *tx)
+            .await
+            .change_context(AppError::Unknown)?;
+    references.extend(cookies);
+    let mut rows = 0;
+    for value in references {
+        // 登记的值可能是绝对路径也可能是相对当前工作目录的写法，比较前先规范化
+        let Ok(path) = normalize_cookie_reference(&value, server_root) else {
+            continue;
+        };
+        if path != source {
+            continue;
+        }
+        // 同一个文件可能同时被登记成绝对与相对两种写法；改成同一目标会撞上
+        // `uq_configuration_bilibili_cookie`，OR REPLACE 顺手合并成一行
+        rows += sqlx::query(
+            "UPDATE OR REPLACE configuration SET value = ?1 WHERE key = 'bilibili-cookies' AND value = ?2",
         )
-        .fetch_all(&mut *tx)
+        .bind(&dest)
+        .bind(&value)
+        .execute(&mut *tx)
         .await
-        .change_context(AppError::Unknown)?;
-        references.extend(cookies);
-        for value in references {
-            // 登记的值可能是绝对路径也可能是相对当前工作目录的写法，比较前先规范化
-            let Ok(path) = normalize_cookie_reference(&value, &server_root) else {
-                continue;
-            };
-            let Some((_, dest)) = repoints.iter().find(|(source, _)| *source == path) else {
-                continue;
-            };
-            // 同一个文件可能同时被登记成绝对与相对两种写法；改成同一个目标会撞上
-            // `uq_configuration_bilibili_cookie`，OR REPLACE 顺手合并成一行
-            repointed += sqlx::query(
-                "UPDATE OR REPLACE configuration SET value = ?1 WHERE key = 'bilibili-cookies' AND value = ?2",
-            )
-            .bind(dest)
+        .change_context(AppError::Unknown)?
+        .rows_affected() as usize;
+        rows += sqlx::query("UPDATE uploadstreamers SET user_cookie = ?1 WHERE user_cookie = ?2")
+            .bind(&dest)
             .bind(&value)
             .execute(&mut *tx)
             .await
             .change_context(AppError::Unknown)?
             .rows_affected() as usize;
-            repointed +=
-                sqlx::query("UPDATE uploadstreamers SET user_cookie = ?1 WHERE user_cookie = ?2")
-                    .bind(dest)
-                    .bind(&value)
-                    .execute(&mut *tx)
-                    .await
-                    .change_context(AppError::Unknown)?
-                    .rows_affected() as usize;
-        }
-        tx.commit().await.change_context(AppError::Unknown)?;
     }
-
-    Ok(AccountMigration {
-        migrated: migrated.len(),
-        repointed,
-    })
+    tx.commit().await.change_context(AppError::Unknown)?;
+    Ok(rows)
 }
 
-/// `data/` 顶层还能用明文读到的账号文件：`(mid, 规范化后的路径)`
-fn plaintext_accounts(data_dir: &Path) -> Vec<(u64, PathBuf)> {
+/// 把一份明文挪进本次运行的备份目录（`accounts-migration-<ts>/`，0700，只移动不删除）
+fn move_to_backup(
+    slot: &mut Option<PathBuf>,
+    backup_root: &Path,
+    source: &Path,
+) -> std::io::Result<()> {
+    let directory = match slot {
+        Some(directory) => directory.clone(),
+        None => {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .as_secs();
+            let directory = backup_root.join(format!("accounts-migration-{stamp}"));
+            private_dir(&directory)?;
+            *slot = Some(directory.clone());
+            directory
+        }
+    };
+    let name = source.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "凭据文件没有文件名")
+    })?;
+    std::fs::rename(source, directory.join(name))
+}
+
+#[cfg(unix)]
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
+/// `data/` 顶层还能用明文读到的账号文件：`(mid, 规范化后的路径, 内容)`
+fn plaintext_accounts(data_dir: &Path) -> Vec<(u64, PathBuf, serde_json::Value)> {
     const MAX_ACCOUNT_BYTES: u64 = 8 * 1024 * 1024;
     let Ok(entries) = std::fs::read_dir(data_dir) else {
         return Vec::new();
@@ -457,7 +549,7 @@ fn plaintext_accounts(data_dir: &Path) -> Vec<(u64, PathBuf)> {
         let Ok(source) = normalize_credential_path(&path) else {
             continue;
         };
-        found.push((mid, source));
+        found.push((mid, source, value));
     }
     found
 }
@@ -967,7 +1059,9 @@ mod cookie_tests {
     #[tokio::test]
     async fn registers_an_encrypted_cookie_file() {
         let (dir, pool) = setup().await;
-        let _lock = KEY_ENV_LOCK.lock().unwrap();
+        let _lock = KEY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = KeyEnv::set(&dir.path().join("accounts.key"));
         let store = biliup_accounts::AccountStore::open(dir.path(), None).unwrap();
         let value: serde_json::Value = serde_json::from_str(COOKIE_JSON).unwrap();
@@ -985,10 +1079,49 @@ mod cookie_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registration_reports_a_missing_or_unsafe_key_without_leaking_paths() {
+        let (dir, pool) = setup().await;
+        let _lock = KEY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = dir.path().join("accounts.key");
+        let _env = KeyEnv::set(&key);
+        let store = biliup_accounts::AccountStore::open(dir.path(), Some(&key)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(COOKIE_JSON).unwrap();
+        let path = store.save(1, &value).unwrap();
+
+        let key_bytes = fs::read(&key).unwrap();
+        fs::remove_file(&key).unwrap();
+        let missing = register_bilibili_cookie(&pool, &path).await.unwrap_err();
+        let message = match missing.current_context() {
+            crate::server::errors::AppError::Custom(message) => message.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert!(message.contains("密钥缺失"), "{message}");
+        assert!(!message.contains("test-access-token"));
+
+        fs::write(&key, &key_bytes).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let unsafe_key = register_bilibili_cookie(&pool, &path).await.unwrap_err();
+        let message = match unsafe_key.current_context() {
+            crate::server::errors::AppError::Custom(message) => message.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert!(message.contains("权限"), "{message}");
+        assert!(!message.contains("test-access-token"));
+    }
+
     #[tokio::test]
     async fn saves_qrcode_login_as_an_encrypted_account_file() {
         let dir = tempfile::tempdir().unwrap();
-        let _lock = KEY_ENV_LOCK.lock().unwrap();
+        let _lock = KEY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = KeyEnv::set(&dir.path().join("accounts.key"));
         let info: biliup::credential::LoginInfo = serde_json::from_str(COOKIE_JSON).unwrap();
 
