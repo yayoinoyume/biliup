@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 anyhow = "1.0"
 axum = "0.8"
 base64 = "0.23"
+biliup-accounts = { path = "../biliup-accounts" }
 brotli = "8"
 byteorder = "1.5"
 chrono = { workspace = true }

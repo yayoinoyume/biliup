@@ -710,6 +710,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.23.1",
+ "biliup-accounts",
  "brotli 8.0.4",
  "byteorder",
  "chrono",

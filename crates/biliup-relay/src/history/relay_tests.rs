@@ -32,6 +32,7 @@ async fn boot(room: i32) -> (Harness, RelayService) {
         data_dir: data_dir.clone(),
         key_file: Some(key_file.clone()),
         ffmpeg_path: None,
+        account_provider: None,
     };
     storage::init(&data_dir, Some(&key_file)).expect("打开存储");
     storage::write_document("config.json", &seed(room)).expect("写入配置");

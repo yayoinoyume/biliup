@@ -58,11 +58,24 @@ pub enum MonitorSpawnOutcome {
     CleanupPending,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RelayInitConfig {
     pub data_dir: PathBuf,
     pub key_file: Option<PathBuf>,
     pub ffmpeg_path: Option<PathBuf>,
+    /// 宿主的账号来源；`None` 时转播只读自己的 `cookies.json`。
+    pub account_provider: Option<Arc<dyn biliup_accounts::AccountProvider>>,
+}
+
+impl std::fmt::Debug for RelayInitConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayInitConfig")
+            .field("data_dir", &self.data_dir)
+            .field("key_file", &self.key_file)
+            .field("ffmpeg_path", &self.ffmpeg_path)
+            .field("account_provider", &self.account_provider.is_some())
+            .finish()
+    }
 }
 
 impl Default for RelayInitConfig {
@@ -71,6 +84,7 @@ impl Default for RelayInitConfig {
             data_dir: PathBuf::from("data/relay"),
             key_file: None,
             ffmpeg_path: None,
+            account_provider: None,
         }
     }
 }
@@ -237,6 +251,7 @@ impl RelayService {
             return Ok(());
         }
         std::fs::create_dir_all(&cfg.data_dir).map_err(RelayError::DataDir)?;
+        credential_bridge::set_account_provider(cfg.account_provider.clone());
         let store = storage::init(&cfg.data_dir, cfg.key_file.as_deref()).map_err(RelayError::Storage)?;
         // 统计引擎先注册总线消费者，再让 seal 发出进程启动事实；
         // 顺序颠倒会让统计静默漏收本进程的全部事件。
@@ -578,6 +593,7 @@ mod tests {
             data_dir: dir.path().join("relay"),
             key_file: Some(key_file.clone()),
             ffmpeg_path: None,
+            account_provider: None,
         };
 
         relay.start(cfg.clone()).await.expect("启动应成功");
@@ -648,6 +664,7 @@ mod tests {
             data_dir: dir.path().join("relay"),
             key_file: Some(dir.path().join("keys/master.key")),
             ffmpeg_path: None,
+            account_provider: None,
         };
         let relay = RelayService::new().with_background_workers();
         for round in 0..2 {
@@ -675,6 +692,7 @@ mod tests {
                 data_dir: dir.path().join("relay"),
                 key_file: Some(dir.path().join("keys/master.key")),
                 ffmpeg_path: None,
+                account_provider: None,
             })
             .await
             .expect("启动应成功");
@@ -696,6 +714,7 @@ mod tests {
                 data_dir: dir.path().join("relay"),
                 key_file: Some(dir.path().join("keys/master.key")),
                 ffmpeg_path: None,
+                account_provider: None,
             })
             .await
             .expect("启动应成功");
@@ -928,6 +947,7 @@ mod tests {
                 data_dir: dir.path().join("relay"),
                 key_file: Some(dir.path().join("keys/master.key")),
                 ffmpeg_path: None,
+                account_provider: None,
             })
             .await
             .expect("drop 之后应能立刻重开存储");

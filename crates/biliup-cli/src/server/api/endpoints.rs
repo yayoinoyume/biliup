@@ -632,6 +632,7 @@ pub async fn add_user_endpoint(
             )
                 .into_response()
         })?;
+    crate::refresh_relay_accounts().await;
     Ok(Json(res))
 }
 
@@ -1117,6 +1118,7 @@ pub async fn login_by_qrcode(
     let filename = save_qrcode_login(std::path::Path::new("data"), &info)
         .await
         .map_err(report_to_response)?;
+    crate::refresh_relay_accounts().await;
 
     Ok(Json(json!({ "filename": filename })))
 }

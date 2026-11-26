@@ -3,7 +3,9 @@
 //! 只读解析，绝不打印 cookie/token 明文；错误消息只点名缺了哪个字段名。
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
+use biliup_accounts::AccountProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,6 +14,29 @@ use crate::storage::{self, Store};
 
 /// cookies 文档 id，与 `storage::NAMES` 中的一项一致。
 const COOKIES_DOCUMENT: &str = "cookies.json";
+
+/// 宿主在启动时注入的账号来源；`None` 时转播只用自己的 `cookies.json`。
+static ACCOUNT_PROVIDER: RwLock<Option<Arc<dyn AccountProvider>>> = RwLock::new(None);
+
+/// 换掉（或清空）本进程的账号来源：转播 `start` 时注入，重启后可重置。
+pub fn set_account_provider(provider: Option<Arc<dyn AccountProvider>>) {
+    *ACCOUNT_PROVIDER
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = provider;
+}
+
+/// 当前账号来源。
+pub fn account_provider() -> Option<Arc<dyn AccountProvider>> {
+    ACCOUNT_PROVIDER
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// 按登记行号取账号凭据文档；没注入来源或账号不存在都是 `None`。
+pub fn account_document(id: i64) -> Option<Value> {
+    account_provider()?.resolve(id)
+}
 
 /// 转播引擎读取 B 站账号的两条来源。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

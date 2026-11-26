@@ -15,19 +15,20 @@ use crate::server::config::{Config, StreamerConfig};
 use crate::server::core::download_manager::DownloadManager;
 use crate::server::errors::{AppError, AppResult};
 use crate::server::fleet::FleetOptions;
-use crate::server::infrastructure::connection_pool::ConnectionManager;
+use crate::server::infrastructure::connection_pool::{ConnectionManager, ConnectionPool};
 use crate::server::infrastructure::models::live_streamer::InsertLiveStreamer;
 use crate::server::infrastructure::models::upload_streamer::{
     InsertUploadStreamer, UploadStreamer, is_noop_uploader,
 };
 use crate::server::infrastructure::repositories;
 use crate::server::infrastructure::service_register::ServiceRegister;
+use biliup_accounts::{AccountMeta, AccountProvider};
 use clap::ValueEnum;
 use error_stack::{Report, ResultExt, bail};
 use futures::future::BoxFuture;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use tracing_subscriber::{EnvFilter, Registry, reload};
 
 // 定义 Handle 的类型别名，简化代码
@@ -227,12 +228,15 @@ pub async fn serve_on(
         .ffmpeg_path
         .clone()
         .map(PathBuf::from);
+    let relay_accounts = SqliteAccountProvider::load(&conn_pool).await;
+    install_relay_accounts(Arc::clone(&relay_accounts), conn_pool.clone());
     if let Err(error) = service_register
         .relay
         .start(biliup_relay::RelayInitConfig {
             data_dir: PathBuf::from("data/relay"),
             key_file: None,
             ffmpeg_path: relay_ffmpeg_path,
+            account_provider: Some(relay_accounts),
         })
         .await
     {
@@ -525,6 +529,110 @@ pub enum UploadLine {
     Alia,
     Estx,
     Akbd,
+}
+
+/// 宿主账号登记表的只读快照：`id` 就是 `configuration` 里 `bilibili-cookies` 的行号。
+#[derive(Default)]
+pub struct SqliteAccountProvider {
+    accounts: RwLock<std::collections::BTreeMap<i64, StoredAccount>>,
+}
+
+struct StoredAccount {
+    meta: AccountMeta,
+    document: serde_json::Value,
+}
+
+impl SqliteAccountProvider {
+    pub async fn load(pool: &ConnectionPool) -> Arc<Self> {
+        let provider = Arc::new(Self::default());
+        provider.reload(pool).await;
+        provider
+    }
+
+    /// 重读登记表：解不开或读不了的账号只警告并跳过，不影响其余账号。
+    pub async fn reload(&self, pool: &ConnectionPool) {
+        let rows = sqlx::query_as::<_, (i64, String)>(
+            "SELECT id, value FROM configuration WHERE key = 'bilibili-cookies' ORDER BY id",
+        )
+        .fetch_all(pool)
+        .await;
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "读不了 B 站账号登记表，转播账号选择沿用上一份快照");
+                return;
+            }
+        };
+        let mut accounts = std::collections::BTreeMap::new();
+        for (id, path) in rows {
+            let info = match biliup::uploader::credential::load_login_info(Path::new(&path)) {
+                Ok(info) => info,
+                Err(error) => {
+                    tracing::warn!(id, path = %path, %error, "B 站账号读不了，跳过");
+                    continue;
+                }
+            };
+            let document = match serde_json::to_value(&info) {
+                Ok(document) => document,
+                Err(error) => {
+                    tracing::warn!(id, %error, "B 站账号无法转成凭据文档，跳过");
+                    continue;
+                }
+            };
+            accounts.insert(
+                id,
+                StoredAccount {
+                    meta: AccountMeta {
+                        id,
+                        mid: info.token_info.mid,
+                        name: None,
+                    },
+                    document,
+                },
+            );
+        }
+        *self.write() = accounts;
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, std::collections::BTreeMap<i64, StoredAccount>> {
+        self.accounts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, std::collections::BTreeMap<i64, StoredAccount>> {
+        self.accounts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl AccountProvider for SqliteAccountProvider {
+    fn list(&self) -> Vec<AccountMeta> {
+        self.read()
+            .values()
+            .map(|account| account.meta.clone())
+            .collect()
+    }
+
+    fn resolve(&self, id: i64) -> Option<serde_json::Value> {
+        self.read()
+            .get(&id)
+            .map(|account| account.document.clone())
+    }
+}
+
+static RELAY_ACCOUNTS: OnceLock<(Arc<SqliteAccountProvider>, ConnectionPool)> = OnceLock::new();
+
+pub fn install_relay_accounts(provider: Arc<SqliteAccountProvider>, pool: ConnectionPool) {
+    let _ = RELAY_ACCOUNTS.set((provider, pool));
+}
+
+/// 登记或登录出新账号后刷新快照，不必重启服务。
+pub async fn refresh_relay_accounts() {
+    if let Some((provider, pool)) = RELAY_ACCOUNTS.get() {
+        provider.reload(pool).await;
+    }
 }
 
 #[cfg(test)]

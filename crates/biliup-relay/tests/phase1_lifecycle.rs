@@ -79,6 +79,7 @@ async fn boot() -> (Harness, RelayService) {
         data_dir: data_dir.clone(),
         key_file: Some(key_file.clone()),
         ffmpeg_path: None,
+        account_provider: None,
     };
     let relay = RelayService::new();
     relay.start(init.clone()).await.expect("启动应成功");

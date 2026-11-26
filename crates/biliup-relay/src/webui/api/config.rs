@@ -225,6 +225,7 @@ fn config_response(cfg: &Config) -> serde_json::Value {
     ));
     response["youtube_api_key_mask"] = json!(credential_mask(&cfg.youtube_api_keys().join("\n")));
     response["secret_revision"] = json!(crate::config::config_data_revision(cfg));
+    response["account_id"] = json!(cfg.bililive.account_id);
     response
 }
 
@@ -268,6 +269,8 @@ pub struct UpdateConfigRequest {
     youtube_deno_path: Option<String>,
     anti_collision_list: Option<HashMap<String, i32>>,
     enable_danmaku_command: Option<bool>,
+    #[serde(default, deserialize_with = "double_option")]
+    account_id: Option<Option<i64>>,
     youtube_enable_monitor: Option<bool>,
     twitch_enable_monitor: Option<bool>,
     warning_hold_exempt: Option<Vec<crate::plugins::warning_exempt::ExemptChannel>>,
@@ -375,6 +378,7 @@ fn config_form_values(cfg: &Config) -> serde_json::Value {
         "auto_cover": cfg.auto_cover,
         "enable_anti_collision": cfg.enable_anti_collision,
         "enable_danmaku_command": cfg.bililive.enable_danmaku_command,
+        "account_id": cfg.bililive.account_id,
         "holodex_monitor_gate": cfg.holodex_monitor_gate,
         "enable_lol_monitor": cfg.enable_lol_monitor,
         "lol_monitor_interval": cfg.lol_monitor_interval.unwrap_or(1),
@@ -549,6 +553,15 @@ fn schedule_settings_sync(monitored: bool, settings: bool) -> String {
         }
     });
     "；节点同步在后台进行".into()
+}
+
+/// 区分字段缺席与显式 `null`：缺席保留原值，`null` 表示“不选”。
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 pub async fn update_config(
@@ -821,6 +834,9 @@ pub async fn update_config(
 
     if let Some(enable_danmaku_command) = payload.enable_danmaku_command {
         cfg.bililive.enable_danmaku_command = enable_danmaku_command;
+    }
+    if let Some(account_id) = payload.account_id {
+        cfg.bililive.account_id = account_id;
     }
     if let Some(auto_stop_after_source_end) = payload.auto_stop_after_source_end {
         cfg.auto_stop_after_source_end = auto_stop_after_source_end;
@@ -1414,5 +1430,52 @@ mod tests {
             validated_exempt_all_low_risk(&["game_mode_off".into()], true).is_err(),
             "只勾中高风险类型撑不起低风险开关"
         );
+    }
+
+    #[test]
+    fn the_selected_account_is_read_saved_and_cleared_through_the_form() {
+        let mut cfg = crate::test_support::config("local", 0);
+        assert_eq!(config_form_values(&cfg)["account_id"], json!(null));
+        assert_eq!(config_response(&cfg)["account_id"], json!(null));
+
+        cfg.bililive.account_id = Some(7);
+        assert_eq!(config_form_values(&cfg)["account_id"], json!(7));
+        assert_eq!(config_response(&cfg)["account_id"], json!(7));
+
+        let current = config_form_values(&cfg);
+        let expected = HashMap::from([("account_id".into(), current["account_id"].clone())]);
+        assert!(validate_edit_preconditions(&current, &json!({"account_id": 9}), Some(&expected)).is_ok());
+        assert_eq!(
+            validate_edit_preconditions(&current, &json!({"account_id": 9}), None),
+            Ok(())
+        );
+
+        let payload: UpdateConfigRequest =
+            serde_json::from_value(json!({"account_id": 9})).unwrap();
+        assert_eq!(payload.account_id, Some(Some(9)));
+        let cleared: UpdateConfigRequest =
+            serde_json::from_value(json!({"account_id": null})).unwrap();
+        assert_eq!(cleared.account_id, Some(None));
+        let untouched: UpdateConfigRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(untouched.account_id, None);
+    }
+
+    #[test]
+    fn the_form_never_carries_account_credentials() {
+        let mut cfg = crate::test_support::config("local", 0);
+        cfg.bililive.account_id = Some(7);
+        cfg.bililive.credentials.sessdata = "synthetic-form-sessdata-1a".into();
+        cfg.bililive.credentials.bili_jct = "synthetic-form-csrf-2b".into();
+        for value in [config_response(&cfg), config_form_values(&cfg)] {
+            let text = value.to_string();
+            for leaked in [
+                "synthetic-form-sessdata-1a",
+                "synthetic-form-csrf-2b",
+                "sessdata",
+                "bili_jct",
+            ] {
+                assert!(!text.contains(leaked), "{leaked} leaked into {text}");
+            }
+        }
     }
 }

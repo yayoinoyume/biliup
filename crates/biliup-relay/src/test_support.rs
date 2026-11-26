@@ -31,6 +31,7 @@ pub(crate) fn config(node_id: &str, priority: i32) -> Config {
             room: 1,
             bili_rtmp_url: String::new(),
             bili_rtmp_key: String::new(),
+            account_id: None,
             credentials: Credentials::default(),
         },
         twitch: Twitch {

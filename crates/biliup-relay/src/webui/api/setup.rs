@@ -389,6 +389,7 @@ fn default_first_install_config() -> crate::config::Config {
             room: 0,
             bili_rtmp_url: "rtmp://live-push.bilivideo.com/live-bvc/".to_string(),
             bili_rtmp_key: String::new(),
+            account_id: None,
             credentials: crate::config::Credentials::default(),
         },
         twitch: crate::config::Twitch {
