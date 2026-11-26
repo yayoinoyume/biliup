@@ -6,8 +6,25 @@
 use super::model::Account;
 use crate::server::infrastructure::connection_pool::ConnectionPool;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::Path;
-use tracing::debug;
+use std::sync::{Mutex, OnceLock};
+use tracing::{debug, warn};
+
+static UNSUPPORTED_CIPHERTEXT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// 密文不做同步，但也不能静默丢账号：同一个文件只警告一次，Fleet 心跳每 10 秒扫一遍。
+pub(crate) fn warn_ciphertext_once(path: &str, message: &'static str) {
+    let known = UNSUPPORTED_CIPHERTEXT.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut known = known
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if known.insert(format!("{message}:{path}")) {
+        warn!(path = %path, "{message}");
+    } else {
+        debug!(path = %path, "{message}");
+    }
+}
 
 /// 本机的一个账号与它的凭据文件
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +81,14 @@ pub async fn scan(pool: &ConnectionPool) -> Vec<LocalAccount> {
         let Ok(text) = tokio::fs::read_to_string(Path::new(&path)).await else {
             continue;
         };
+        // 密文不做同步：静默跳过会让账号在节点上凭空消失，这里必须明说
+        if biliup_accounts::is_ciphertext(text.as_bytes()) {
+            warn_ciphertext_once(
+                &path,
+                "B 站账号凭据是加密文件，Fleet 账号上报不支持密文，这回不报这个账号",
+            );
+            continue;
+        }
         let Some((mid, uname)) = parse_credential(&text) else {
             continue;
         };
@@ -119,7 +144,10 @@ mod tests {
         let broken = write("c.json", serde_json::json!({ "cookie_info": {} }));
         let other = write("d.json", serde_json::json!({ "token_info": { "mid": 7 } }));
         let missing = dir.path().join("gone.json").to_string_lossy().into_owned();
-        for path in [&first, &duplicate, &broken, &missing, &other] {
+        let encrypted = dir.path().join("e.json.enc");
+        std::fs::write(&encrypted, b"BUPACC1synthetic-ciphertext").unwrap();
+        let encrypted = encrypted.to_string_lossy().into_owned();
+        for path in [&first, &duplicate, &broken, &missing, &other, &encrypted] {
             sqlx::query("INSERT INTO configuration (key, value) VALUES ('bilibili-cookies', ?)")
                 .bind(path)
                 .execute(&pool)

@@ -160,6 +160,14 @@ async fn registered(services: &ServiceRegister) -> Vec<Registered> {
         let Ok(text) = tokio::fs::read_to_string(&path).await else {
             continue;
         };
+        // 密文不做同步：静默跳过会让账号在对端凭空消失，这里必须明说
+        if biliup_accounts::is_ciphertext(text.as_bytes()) {
+            crate::server::fleet::accounts::warn_ciphertext_once(
+                &path,
+                "配对同步：B 站账号凭据是加密文件，HA 账号同步不支持密文，跳过这个账号",
+            );
+            continue;
+        }
         let Some((mid, _)) = crate::server::fleet::accounts::parse_credential(&text) else {
             continue;
         };

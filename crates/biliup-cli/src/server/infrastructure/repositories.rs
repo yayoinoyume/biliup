@@ -6,8 +6,9 @@ use crate::server::infrastructure::models::upload_streamer::{
     InsertUploadStreamer, UploadStreamer,
 };
 use crate::server::infrastructure::models::{Configuration, InsertConfiguration};
-use biliup::uploader::credential::{LoginInfo, lock_credential_file, normalize_credential_path};
-use error_stack::{ResultExt, bail};
+use biliup::uploader::credential::{lock_credential_file, normalize_credential_path};
+use biliup_accounts::AccountStore;
+use error_stack::{Report, ResultExt, bail};
 use ormlite::{Insert, Model};
 use serde::Serialize;
 use std::io::Write;
@@ -288,11 +289,14 @@ pub async fn register_bilibili_cookie(
 
     // Registration confers permission to read and eventually delete this file,
     // so require it to actually be a supported credential document.
-    let file = std::fs::File::open(&cookie_file)
-        .change_context(AppError::Unknown)
-        .attach_with(|| format!("open cookie file {}", cookie_file.display()))?;
-    serde_json::from_reader::<_, LoginInfo>(std::io::BufReader::new(file))
-        .change_context(AppError::Custom("无效的 B 站凭据文件".into()))?;
+    if let Err(error) = biliup::uploader::credential::load_login_info(&cookie_file) {
+        return Err(
+            Report::new(AppError::Custom("无效的 B 站凭据文件".into())).attach(format!(
+                "read cookie file {}: {error}",
+                cookie_file.display()
+            )),
+        );
+    }
 
     let cookie_path = cookie_file.to_string_lossy().into_owned();
 
@@ -319,6 +323,143 @@ pub async fn register_bilibili_cookie(
         .fetch_optional(pool)
         .await
         .change_context(AppError::Unknown)
+}
+
+/// 一次启动迁移的结果：迁成密文的账号数、两张表里改成新路径的行数
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AccountMigration {
+    pub migrated: usize,
+    pub repointed: usize,
+}
+
+/// 把 `data/*.json` 里的旧明文账号迁成 `data/accounts/{mid}.json.enc`，并在**同一个事务**里把
+/// `configuration.value` 与 `uploadstreamers.user_cookie` 里的旧路径改成新路径。
+///
+/// 只扫 `data/` 顶层：CLI 命令行默认的凭据文件在工作目录根下，不在这里，它的明文读取路径保持不变。
+pub async fn migrate_plaintext_accounts(
+    pool: &ConnectionPool,
+    data_dir: &Path,
+    backup_root: &Path,
+) -> AppResult<AccountMigration> {
+    let store = AccountStore::open(data_dir, None)
+        .change_context(AppError::Unknown)
+        .attach_with(|| format!("open account store {}", data_dir.display()))?;
+    // 之后 credential.rs 的读写都按这个环境变量找密钥，必须是绝对路径。
+    // 启动期调用，此时还没有其他线程在读写环境变量。
+    if std::env::var_os(biliup_accounts::KEY_FILE_ENV).is_none() {
+        let key =
+            std::path::absolute(data_dir.join("accounts.key")).change_context(AppError::Unknown)?;
+        unsafe { std::env::set_var(biliup_accounts::KEY_FILE_ENV, key) };
+    }
+
+    // 先记下迁移前的明文与其目标：`migrate_plaintext` 只报告它新建的密文，
+    // 目标已存在时那行登记也要改路径，否则旧路径会指向被移进备份的文件。
+    let candidates = plaintext_accounts(data_dir);
+    let migrated = store
+        .migrate_plaintext(backup_root)
+        .change_context(AppError::Unknown)
+        .attach_with(|| format!("migrate plaintext accounts in {}", data_dir.display()))?;
+
+    let mut repoints: Vec<(PathBuf, String)> = Vec::new();
+    for (mid, source) in candidates {
+        let dest = store.path_for(mid);
+        if !dest.is_file() {
+            continue;
+        }
+        let Ok(dest) = normalize_credential_path(&dest) else {
+            continue;
+        };
+        repoints.push((source, dest.to_string_lossy().into_owned()));
+    }
+
+    let mut repointed = 0;
+    if !repoints.is_empty() {
+        let server_root = std::env::current_dir().change_context(AppError::Unknown)?;
+        let mut tx = pool.begin().await.change_context(AppError::Unknown)?;
+        let mut references: Vec<String> =
+            sqlx::query_scalar("SELECT value FROM configuration WHERE key = 'bilibili-cookies'")
+                .fetch_all(&mut *tx)
+                .await
+                .change_context(AppError::Unknown)?;
+        let cookies: Vec<String> = sqlx::query_scalar(
+            "SELECT user_cookie FROM uploadstreamers WHERE user_cookie IS NOT NULL",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .change_context(AppError::Unknown)?;
+        references.extend(cookies);
+        for value in references {
+            // 登记的值可能是绝对路径也可能是相对当前工作目录的写法，比较前先规范化
+            let Ok(path) = normalize_cookie_reference(&value, &server_root) else {
+                continue;
+            };
+            let Some((_, dest)) = repoints.iter().find(|(source, _)| *source == path) else {
+                continue;
+            };
+            // 同一个文件可能同时被登记成绝对与相对两种写法；改成同一个目标会撞上
+            // `uq_configuration_bilibili_cookie`，OR REPLACE 顺手合并成一行
+            repointed += sqlx::query(
+                "UPDATE OR REPLACE configuration SET value = ?1 WHERE key = 'bilibili-cookies' AND value = ?2",
+            )
+            .bind(dest)
+            .bind(&value)
+            .execute(&mut *tx)
+            .await
+            .change_context(AppError::Unknown)?
+            .rows_affected() as usize;
+            repointed +=
+                sqlx::query("UPDATE uploadstreamers SET user_cookie = ?1 WHERE user_cookie = ?2")
+                    .bind(dest)
+                    .bind(&value)
+                    .execute(&mut *tx)
+                    .await
+                    .change_context(AppError::Unknown)?
+                    .rows_affected() as usize;
+        }
+        tx.commit().await.change_context(AppError::Unknown)?;
+    }
+
+    Ok(AccountMigration {
+        migrated: migrated.len(),
+        repointed,
+    })
+}
+
+/// `data/` 顶层还能用明文读到的账号文件：`(mid, 规范化后的路径)`
+fn plaintext_accounts(data_dir: &Path) -> Vec<(u64, PathBuf)> {
+    const MAX_ACCOUNT_BYTES: u64 = 8 * 1024 * 1024;
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
+            || !path.is_file()
+        {
+            continue;
+        }
+        if std::fs::metadata(&path).map_or(true, |metadata| metadata.len() > MAX_ACCOUNT_BYTES) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let Some(mid) = value
+            .pointer("/token_info/mid")
+            .and_then(|mid| mid.as_u64())
+        else {
+            continue;
+        };
+        let Ok(source) = normalize_credential_path(&path) else {
+            continue;
+        };
+        found.push((mid, source));
+    }
+    found
 }
 
 #[derive(Debug, Serialize)]
@@ -556,10 +697,7 @@ mod cookie_tests {
     use std::fs;
     use std::path::Path;
 
-    fn write_cookie(path: &Path) {
-        fs::write(
-            path,
-            r#"{
+    const COOKIE_JSON: &str = r#"{
                 "cookie_info": {"cookies": []},
                 "sso": [],
                 "token_info": {
@@ -569,9 +707,34 @@ mod cookie_tests {
                     "refresh_token": "test-refresh-token"
                 },
                 "platform": "Android"
-            }"#,
-        )
-        .unwrap();
+            }"#;
+
+    fn write_cookie(path: &Path) {
+        fs::write(path, COOKIE_JSON).unwrap();
+    }
+
+    /// 密文用例要改 `BILIUP_ACCOUNT_KEY_FILE`；持锁期间独享，用完恢复
+    static KEY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct KeyEnv(Option<std::ffi::OsString>);
+
+    impl KeyEnv {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os(biliup_accounts::KEY_FILE_ENV);
+            unsafe { std::env::set_var(biliup_accounts::KEY_FILE_ENV, path) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for KeyEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(value) => std::env::set_var(biliup_accounts::KEY_FILE_ENV, value),
+                    None => std::env::remove_var(biliup_accounts::KEY_FILE_ENV),
+                }
+            }
+        }
     }
 
     async fn setup() -> (
@@ -799,6 +962,53 @@ mod cookie_tests {
                 .await
                 .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn registers_an_encrypted_cookie_file() {
+        let (dir, pool) = setup().await;
+        let _lock = KEY_ENV_LOCK.lock().unwrap();
+        let _env = KeyEnv::set(&dir.path().join("accounts.key"));
+        let store = biliup_accounts::AccountStore::open(dir.path(), None).unwrap();
+        let value: serde_json::Value = serde_json::from_str(COOKIE_JSON).unwrap();
+        let path = store.save(1, &value).unwrap();
+        assert!(fs::read(&path).unwrap().starts_with(b"BUPACC1"));
+
+        let registered = register_bilibili_cookie(&pool, &path)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            registered.value,
+            path.canonicalize().unwrap().to_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn saves_qrcode_login_as_an_encrypted_account_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _lock = KEY_ENV_LOCK.lock().unwrap();
+        let _env = KeyEnv::set(&dir.path().join("accounts.key"));
+        let info: biliup::credential::LoginInfo = serde_json::from_str(COOKIE_JSON).unwrap();
+
+        let path = crate::server::api::endpoints::save_qrcode_login(dir.path(), &info)
+            .await
+            .unwrap();
+
+        assert_eq!(path, dir.path().join("accounts").join("1.json.enc"));
+        assert!(fs::read(&path).unwrap().starts_with(b"BUPACC1"));
+        let store = biliup_accounts::AccountStore::open(dir.path(), None).unwrap();
+        assert_eq!(store.load(1).unwrap(), serde_json::to_value(&info).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.path().join("accounts"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
     }
 
     #[cfg(unix)]

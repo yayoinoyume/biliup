@@ -631,6 +631,7 @@ dependencies = [
  "axum-login",
  "base64 0.22.1",
  "biliup",
+ "biliup-accounts",
  "biliup-relay",
  "bon",
  "bytes",

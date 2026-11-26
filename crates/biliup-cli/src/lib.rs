@@ -149,6 +149,24 @@ pub async fn serve_on(
         Err(e) => tracing::warn!(error = %e, "标记投稿结果未知的切片失败"),
     }
 
+    // 旧版账号是 `data/<mid>.json` 明文：先迁成密文并把两张表里的引用改成新路径，
+    // 迁不动只警告——账号读不了不该连累录制与上传启动。
+    match repositories::migrate_plaintext_accounts(
+        &conn_pool,
+        Path::new("data"),
+        Path::new("data/.backups"),
+    )
+    .await
+    {
+        Ok(report) if report.migrated > 0 || report.repointed > 0 => tracing::info!(
+            migrated = report.migrated,
+            repointed = report.repointed,
+            "旧版明文 B 站账号已迁移为加密文件"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "旧版明文 B 站账号迁移失败，继续启动"),
+    }
+
     if let Some(configuration) =
         repositories::register_bilibili_cookie(&conn_pool, &user_cookie).await?
     {

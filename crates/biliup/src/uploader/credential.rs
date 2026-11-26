@@ -59,7 +59,7 @@ impl AppKeyStore {
 }
 
 pub fn bilibili_from_cookies(file: impl AsRef<Path>, proxy: Option<&str>) -> Result<BiliBili> {
-    let login_info = read_login_info(file.as_ref())?;
+    let login_info = load_login_info(file.as_ref())?;
     bilibili_from_info(login_info, proxy)
 }
 
@@ -89,7 +89,8 @@ fn configured_cipher() -> Result<Cipher> {
     })
 }
 
-fn read_login_info(path: &Path) -> Result<LoginInfo> {
+/// 读一份凭据文件：明文 JSON 直接解析，`BUPACC` 开头的按 `BILIUP_ACCOUNT_KEY_FILE` 的密钥解密。
+pub fn load_login_info(path: &Path) -> Result<LoginInfo> {
     let bytes = Zeroizing::new(std::fs::read(path)?);
     let plaintext = if biliup_accounts::is_ciphertext(&bytes) {
         configured_cipher()?
@@ -268,7 +269,7 @@ pub async fn save_login_info(path: impl AsRef<Path>, login_info: &LoginInfo) -> 
 pub async fn renew_login_info_file(path: impl AsRef<Path>, proxy: Option<&str>) -> Result<()> {
     let path = normalize_credential_path(path)?;
     let _guard = lock_credential_file(&path).await?;
-    let login_info = read_login_info(&path)?;
+    let login_info = load_login_info(&path)?;
     let new_info = Credential::new(proxy).renew_tokens(login_info).await?;
     write_login_info_unlocked(&path, &new_info)
 }
@@ -286,7 +287,7 @@ pub fn bilibili_from_info(login_info: LoginInfo, proxy: Option<&str>) -> Result<
 pub async fn login_by_cookies(file: impl AsRef<Path>, proxy: Option<&str>) -> Result<BiliBili> {
     let path = normalize_credential_path(file)?;
     let _guard = lock_credential_file(&path).await?;
-    let login_info = read_login_info(&path)?;
+    let login_info = load_login_info(&path)?;
 
     let client: Credential = Credential::new(proxy);
     let need_refresh = client.validate_tokens(&login_info).await?;
@@ -554,7 +555,7 @@ mod redaction_tests {
 #[cfg(test)]
 mod encrypted_credential_tests {
     use super::{
-        LoginInfo, TokenInfo, read_login_info, save_login_info, write_login_info_unlocked,
+        LoginInfo, TokenInfo, load_login_info, save_login_info, write_login_info_unlocked,
     };
     use biliup_accounts::KEY_FILE_ENV;
     use serde_json::json;
@@ -625,7 +626,7 @@ mod encrypted_credential_tests {
         assert!(!biliup_accounts::is_ciphertext(&raw));
         assert_private(&path);
 
-        let loaded = read_login_info(&path).unwrap();
+        let loaded = load_login_info(&path).unwrap();
         assert_eq!(loaded.token_info.access_token, "plain-secret");
 
         let legacy = dir.path().join("legacy.json");
@@ -634,7 +635,7 @@ mod encrypted_credential_tests {
             serde_json::to_vec_pretty(&login_info("legacy-secret")).unwrap(),
         )
         .unwrap();
-        let loaded = read_login_info(&legacy).unwrap();
+        let loaded = load_login_info(&legacy).unwrap();
         assert_eq!(loaded.token_info.access_token, "legacy-secret");
         assert_eq!(loaded.token_info.mid, 42);
     }
@@ -652,7 +653,7 @@ mod encrypted_credential_tests {
         assert!(!String::from_utf8_lossy(&raw).contains("enc-secret"));
         assert_private(&path);
 
-        let loaded = read_login_info(&path).unwrap();
+        let loaded = load_login_info(&path).unwrap();
         assert_eq!(loaded.token_info.access_token, "enc-secret");
         assert_eq!(loaded.token_info.mid, 42);
 
@@ -660,7 +661,7 @@ mod encrypted_credential_tests {
         let rewritten = std::fs::read(&path).unwrap();
         assert!(biliup_accounts::is_ciphertext(&rewritten));
         assert_eq!(
-            read_login_info(&path).unwrap().token_info.access_token,
+            load_login_info(&path).unwrap().token_info.access_token,
             "enc-secret"
         );
         clear_key();
@@ -679,7 +680,7 @@ mod encrypted_credential_tests {
         save_login_info(&path, &login_info("guarded-secret")).await.unwrap();
 
         set_key(&write_key(&other, 0x33));
-        let error = read_login_info(&path).unwrap_err().to_string();
+        let error = load_login_info(&path).unwrap_err().to_string();
         assert!(error.contains(DAMAGED), "{error}");
         assert!(!error.contains("guarded-secret"));
 
@@ -688,7 +689,7 @@ mod encrypted_credential_tests {
         let last = raw.len() - 1;
         raw[last] ^= 0x01;
         std::fs::write(&path, &raw).unwrap();
-        let error = read_login_info(&path).unwrap_err().to_string();
+        let error = load_login_info(&path).unwrap_err().to_string();
         assert!(error.contains(DAMAGED), "{error}");
         assert!(!error.contains("guarded-secret"));
         clear_key();
@@ -705,7 +706,7 @@ mod encrypted_credential_tests {
         std::fs::write(&path, &future).unwrap();
         assert!(biliup_accounts::is_ciphertext(&future));
 
-        let error = read_login_info(&path).unwrap_err().to_string();
+        let error = load_login_info(&path).unwrap_err().to_string();
         assert!(error.contains(DAMAGED), "{error}");
         clear_key();
     }
@@ -730,7 +731,7 @@ mod encrypted_credential_tests {
         assert_eq!(&raw[..7], b"BUPACC1");
         assert!(!String::from_utf8_lossy(&raw).contains("renamed-secret"));
         assert_eq!(
-            read_login_info(&renamed).unwrap().token_info.access_token,
+            load_login_info(&renamed).unwrap().token_info.access_token,
             "renamed-secret"
         );
         assert_private(&renamed);
@@ -810,7 +811,7 @@ mod encrypted_credential_tests {
             .unwrap();
 
         clear_key();
-        let error = read_login_info(&path).unwrap_err().to_string();
+        let error = load_login_info(&path).unwrap_err().to_string();
         assert!(error.contains(MISSING_KEY), "{error}");
         assert!(!error.contains("unconfigured-secret"));
 

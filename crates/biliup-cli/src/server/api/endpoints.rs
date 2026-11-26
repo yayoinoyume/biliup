@@ -8,7 +8,7 @@ use crate::server::common::upload_observation::{NewTask, UploadObservations};
 use crate::server::common::util::Recorder;
 use crate::server::config::Config;
 use crate::server::core::download_manager::DownloadManager;
-use crate::server::errors::{ApiError, AppError, report_to_response};
+use crate::server::errors::{ApiError, AppError, AppResult, report_to_response};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::context::{Worker, WorkerStatus};
 use crate::server::infrastructure::dto::{LivePreviewResponse, LiveStreamerResponse};
@@ -33,7 +33,8 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use biliup::credential::{Credential, save_login_info};
+use biliup::credential::{Credential, LoginInfo};
+use biliup_accounts::AccountStore;
 use chrono::Utc;
 use clap::ValueEnum;
 use error_stack::{Report, ResultExt};
@@ -1113,16 +1114,23 @@ pub async fn login_by_qrcode(
     .change_context(AppError::Unknown)
     .map_err(report_to_response)?;
 
-    // extract mid
-    let mid = info.token_info.mid;
-    let filename = format!("data/{}.json", mid);
-
-    save_login_info(&filename, &info)
+    let filename = save_qrcode_login(std::path::Path::new("data"), &info)
         .await
-        .change_context(AppError::Unknown)
         .map_err(report_to_response)?;
 
     Ok(Json(json!({ "filename": filename })))
+}
+
+/// 扫码登录的凭据存成 `data/accounts/{mid}.json.enc`（`AccountStore` 负责建 0700 目录、加密、原子写）
+pub(crate) async fn save_qrcode_login(
+    data_dir: &std::path::Path,
+    info: &LoginInfo,
+) -> AppResult<PathBuf> {
+    let store = AccountStore::open(data_dir, None).change_context(AppError::Unknown)?;
+    let value = serde_json::to_value(info).change_context(AppError::Unknown)?;
+    store
+        .save(info.token_info.mid, &value)
+        .change_context(AppError::Unknown)
 }
 
 /// `GET /v1/videos`：工作目录下的录像文件。属于某一场、能按场次回看的文件另带 `session_id` 和
