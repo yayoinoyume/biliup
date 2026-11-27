@@ -30,7 +30,7 @@ import { AddAccountDialog } from '@/app/ui/UserList'
 import { requestDelete, sendRequest } from '@/app/lib/api-streamer'
 import { useBiliUsers } from '@/app/lib/use-streamers'
 import { useMe } from '@/app/lib/use-me'
-import { isRelayApiError, relayGetConfig } from '@/app/lib/relay'
+import { isRelayApiError } from '@/app/lib/relay'
 import { formatUnixSec } from '@/app/lib/relay-format'
 import { relayErrorMessage } from '@/app/ui/relay/RelayError'
 import { FormDialog } from '@/app/ui/shell'
@@ -161,10 +161,7 @@ function BiliAccountsPanel() {
 
 function YoutubeAccountsPanel() {
   const router = useRouter()
-  const config = useSWR('relay:config', relayGetConfig, { revalidateOnFocus: false })
-  const accounts = useSWR(config.data ? 'relay:youtube-accounts' : null, youtubeAccounts, {
-    revalidateOnFocus: false,
-  })
+  const accounts = useSWR('relay:youtube-accounts', youtubeAccounts, { revalidateOnFocus: false })
   const [addOpen, setAddOpen] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [conflict, setConflict] = useState(false)
@@ -233,32 +230,41 @@ function YoutubeAccountsPanel() {
     await accounts.mutate()
   }
 
-  if (config.error) {
+  if (accounts.error) {
+    const notConfigured =
+      isRelayApiError(accounts.error) &&
+      (accounts.error.status === 412 || accounts.error.code === 'not_configured')
+
+    if (notConfigured) {
+      return (
+        <div className={styles.panel}>
+          <Banner
+            type="warning"
+            closeIcon={null}
+            title="转播服务尚未配置"
+            description="YouTube 账号保存在转播账号存储里；先完成首次配置向导，再回来管理账号。"
+          />
+          <Text type="tertiary" size="small">
+            {relayErrorMessage(accounts.error)}
+          </Text>
+          <div className={styles.toolbarActions}>
+            <Button theme="solid" onClick={() => router.push('/relay/setup')}>
+              前往首次配置向导
+            </Button>
+            <Button onClick={() => void accounts.mutate()}>重试</Button>
+          </div>
+        </div>
+      )
+    }
+
     return (
       <div className={styles.panel}>
-        <Banner
-          type="warning"
-          closeIcon={null}
-          title="尚未完成转播设置"
-          description="YouTube 账号保存在转播配置里。先完成首次配置向导，再回来添加账号。"
-        />
-        <Text type="tertiary" size="small">
-          {relayErrorMessage(config.error)}
-        </Text>
-        <div className={styles.toolbarActions}>
-          <Button theme="solid" onClick={() => router.push('/relay/setup')}>
-            前往首次配置向导
+        <div className={styles.center}>
+          <Empty title="账号列表加载失败" description={relayErrorMessage(accounts.error)} />
+          <Button onClick={() => void accounts.mutate()} style={{ marginTop: 12 }}>
+            重试
           </Button>
-          <Button onClick={() => void config.mutate()}>重试</Button>
         </div>
-      </div>
-    )
-  }
-
-  if (!config.data) {
-    return (
-      <div className={styles.center}>
-        <Spin size="large" />
       </div>
     )
   }
@@ -300,14 +306,7 @@ function YoutubeAccountsPanel() {
           </Button>
         </div>
       </div>
-      {accounts.error ? (
-        <div className={styles.center}>
-          <Empty title="加载失败" description={relayErrorMessage(accounts.error)} />
-          <Button onClick={() => void accounts.mutate()} style={{ marginTop: 12 }}>
-            重试
-          </Button>
-        </div>
-      ) : !data ? (
+      {!data ? (
         <div className={styles.center}>
           <Spin size="large" />
         </div>
@@ -499,7 +498,7 @@ export default function AccountsPage() {
       <PageHeader
         icon={<IconUserGroup size="large" />}
         title="账号中心"
-        description="B 站账号与 YouTube 账号集中管理；YouTube 账号保存在转播配置里。"
+        description="B 站账号与 YouTube 账号集中管理；YouTube 账号保存在转播账号存储里。"
       />
       <div className={dc.content}>
         <Tabs
