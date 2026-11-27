@@ -145,7 +145,7 @@ export default function ApiKeysPanel({ data, onSaved, onReload }: ApiKeysPanelPr
             ))}
             {keys.length === 0 ? (
               <Text type="tertiary" size="small">
-                状态接口没有返回密钥条目；可以到实时日志确认配额查询是否失败。
+                没有读取到密钥列表；可以到实时日志确认配额查询是否失败。
               </Text>
             ) : null}
           </div>

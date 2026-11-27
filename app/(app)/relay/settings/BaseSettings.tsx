@@ -138,7 +138,7 @@ export default function BaseSettings({ data, onSaved, onReload }: BaseSettingsPr
       <SaveErrorBanner error={state.error} onReload={onReload} />
       <SettingsCard
         title="基础设置"
-        description="监听间隔、开播/停播行为与主面板显示哪些平台。保存时只提交改过的字段，并带上原始值做冲突校验。"
+        description="监听间隔、开播/停播行为与主面板显示哪些平台。保存时只提交改过的设置；如果别人刚改过，会提示你先刷新。"
         extra={
           <Tag size="small" type="light">
             配置版本 {data.secret_revision}
@@ -146,7 +146,7 @@ export default function BaseSettings({ data, onSaved, onReload }: BaseSettingsPr
         }
       >
         <div className={styles.formGrid}>
-          <SettingsField label="监听间隔（秒）" hint="轮询直播状态的间隔，允许 1–3600 秒。">
+          <SettingsField label="监听间隔（秒）" hint="检查直播状态的间隔，允许 1–3600 秒。">
             <InputNumber
               value={interval}
               min={1}
@@ -169,7 +169,7 @@ export default function BaseSettings({ data, onSaved, onReload }: BaseSettingsPr
               aria-label="自动停播阈值"
             />
           </SettingsField>
-          <SettingsField label="LOL 监听间隔（秒）" hint="启用 LOL 监控时的轮询间隔，允许 1–3600 秒。">
+          <SettingsField label="LOL 监听间隔（秒）" hint="启用 LOL 监控时的检查间隔，允许 1–3600 秒。">
             <InputNumber
               value={lolInterval}
               min={1}

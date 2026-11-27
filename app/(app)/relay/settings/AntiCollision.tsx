@@ -197,7 +197,7 @@ export default function AntiCollision({ data, onSaved, onReload }: AntiCollision
   return (
     <SettingsCard
       title="防撞车名单"
-      description="频道名到默认分区的映射；写回 /config 时只提交改过的键，并带原始值做冲突校验。"
+      description="频道名到默认分区的映射；保存时只提交改过的设置；如果别人刚改过，会提示你先刷新。"
     >
       {channels.error ? (
         <RelayError

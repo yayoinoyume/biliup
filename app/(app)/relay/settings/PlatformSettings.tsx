@@ -58,7 +58,7 @@ function MonitorToggle({
           应用监听开关
         </Button>
         <Text type="tertiary" size="small">
-          该开关独立保存，后端会拒绝与集群状态冲突的启用请求。
+          该开关独立保存；如果和当前节点状态冲突，这个开关会被拒绝。
         </Text>
       </div>
       <SaveErrorBanner error={error} onReload={onReload} />

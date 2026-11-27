@@ -292,7 +292,7 @@ export default function RelayAnalyticsPage() {
             className={relay.banner}
             type="warning"
             title="统计查询繁忙"
-            description="后端每个节点只允许两个并发统计查询，稍等片刻再刷新。"
+            description="转播服务每个节点只允许同时跑两个统计查询，稍等片刻再刷新。"
             closeIcon={null}
           />
         ) : null}
@@ -303,7 +303,7 @@ export default function RelayAnalyticsPage() {
             title="统计结果过大"
             description={
               <div className={styles.bannerBody}>
-                <Text>后端合并后的响应超过 1MiB。降低采样点或缩小时间范围再看。</Text>
+                <Text>转播服务合并后的结果超过 1MiB。降低采样点或缩小时间范围再看。</Text>
                 <Button
                   size="small"
                   theme="light"
@@ -437,12 +437,12 @@ export default function RelayAnalyticsPage() {
         >
           <div className={relay.stack}>
             <Text>
-              这会删掉本节点统计库里「全部」已记录的行，删完无法恢复；正在转播的节点会被后端拒绝。
+              这会删掉本节点统计库里「全部」已记录的行，删完无法恢复；正在转播的节点会被转播服务拒绝。
             </Text>
             <Text type="tertiary" size="small">
               当前保留期：原始采样 {status?.retention.raw_days ?? '—'} 天，汇总{' '}
               {status?.retention.rollup_days ?? '—'} 天，事件 {status?.retention.event_days ?? '—'} 天。
-              后端清理接口不接受保留天数参数；只想保留最近 N 天的话，请到设置页把保留天数调低，
+              转播服务不支持在清理时指定保留天数；只想保留最近 N 天的话，请到设置页把保留天数调低，
               写入线程会按天自动淘汰。
             </Text>
             {cleanError ? <RelayError error={cleanError} title="清理失败" /> : null}

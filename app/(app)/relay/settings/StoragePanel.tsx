@@ -134,7 +134,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
         <dl className={relayStyles.kv}>
           <dt className={relayStyles.kvKey}>存储状态</dt>
           <dd className={relayStyles.kvValue}>{ready ? '已就绪' : '不可用'}</dd>
-          <dt className={relayStyles.kvKey}>备份版本</dt>
+          <dt className={relayStyles.kvKey}>数据格式版本</dt>
           <dd className={relayStyles.kvValue}>{status?.ready === true ? status.schema : '—'}</dd>
           <dt className={relayStyles.kvKey}>数据库</dt>
           <dd className={relayStyles.kvValue}>

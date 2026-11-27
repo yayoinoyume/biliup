@@ -74,7 +74,7 @@ export default function HolodexLoginModal({ visible, onClose }: HolodexLoginModa
           <dd className={styles.kvValue}>{data?.message?.trim() || '—'}</dd>
         </dl>
         <Text type="tertiary" size="small">
-          收藏列表与 Holodex 频道同步需要 JWT；Holodex API Key 用于公开接口。两者都在转播设置页维护。
+          收藏列表与 Holodex 频道同步需要 JWT；Holodex 密钥用于公开数据。两者都在转播设置页维护。
         </Text>
       </div>
     </FormDialog>

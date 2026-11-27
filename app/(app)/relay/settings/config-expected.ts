@@ -175,7 +175,7 @@ export function buildProxyPatch(
   if (span && text.slice(span.start, span.end).includes(RELAY_MASK_CHAR)) {
     return {
       status: 'invalid',
-      message: '代理密码只以掩码显示：请把密码位清空后保存，后端会沿用已保存的密码',
+      message: '代理密码只以掩码显示：请把密码位清空后保存，会继续使用已保存的密码',
     }
   }
   const keep = configured && proxyHasPasswordMask(shown) && span !== null && !proxyHasPassword(text)
