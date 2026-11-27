@@ -7,6 +7,10 @@ type QrcodeProps = {
   onSuccess: (e: string) => void
 }
 
+const QR_TIMEOUT_MS = 15_000
+const QR_TIMEOUT_MESSAGE =
+  '获取二维码超时。服务器可能连不上 B 站；可以改用「Cookie 文件」添加，或稍后重试。'
+
 /**
  * 扫码登录:拉取二维码 → 挂起等待扫码 → 回调 onSuccess。
  * 健壮性修复:
@@ -19,11 +23,21 @@ const Qrcode: React.FC<QrcodeProps> = ({ onSuccess }) => {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    const controller = new AbortController()
-    const signal = controller.signal
+    let cancelled = false
+    let timedOut = false
+    const loginController = new AbortController()
+    const qrController = new AbortController()
+    const timer = setTimeout(() => {
+      timedOut = true
+      qrController.abort()
+    }, QR_TIMEOUT_MS)
 
     ;(async () => {
-      const qrData = await fetcher('/v1/get_qrcode', undefined)
+      const qrData = await fetcher('/v1/get_qrcode', { signal: qrController.signal }).finally(
+        () => {
+          clearTimeout(timer)
+        },
+      )
       const qrUrl: string | undefined = qrData?.['data']?.['url']
       if (!qrUrl) {
         // 带上响应内容,便于定位(后端偶发 5xx 时 data 结构会缺失)
@@ -38,7 +52,7 @@ const Qrcode: React.FC<QrcodeProps> = ({ onSuccess }) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(qrData),
-        signal,
+        signal: loginController.signal,
       })
       const data = await res.json()
       onSuccess(data['filename'])
@@ -46,7 +60,20 @@ const Qrcode: React.FC<QrcodeProps> = ({ onSuccess }) => {
       // 组件卸载/切换导致的取消,静默忽略。
       // 注意:abort(reason) 时 fetch 可能 reject 原始值(字符串)而非 DOMException,
       // e.name 检查不可靠,用 signal.aborted 判断(与错误对象形态无关)。
-      if (controller.signal.aborted) return
+      if (cancelled) return
+      if (timedOut) {
+        setError(QR_TIMEOUT_MESSAGE)
+        Notification.error({
+          title: 'QRcode',
+          content: (
+            <Typography.Paragraph style={{ maxWidth: 450 }}>
+              {QR_TIMEOUT_MESSAGE}
+            </Typography.Paragraph>
+          ),
+          style: { width: 'min-content' },
+        })
+        return
+      }
       const detail = e?.message || String(e) || '未知错误'
       setError(`二维码获取失败:${detail}`)
       Notification.error({
@@ -59,7 +86,10 @@ const Qrcode: React.FC<QrcodeProps> = ({ onSuccess }) => {
     })
 
     return () => {
-      controller.abort()
+      cancelled = true
+      clearTimeout(timer)
+      qrController.abort()
+      loginController.abort()
     }
   }, [onSuccess])
 

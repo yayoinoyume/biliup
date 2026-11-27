@@ -27,7 +27,7 @@ export function useBiliUsers(enabled = true) {
   const {can} = useMe();
   const {data, error, isLoading} = useSWR<User[]>(enabled && can("template.edit") ? "/v1/users" : null, fetcher);
   // Shared SWR key deduplicates profile requests across all mounted consumers.
-  const {data: list, isLoading: profilesLoading} = useSWR(
+  const {data: list} = useSWR(
     enabled && data?.length ? ['bili-user-profiles', data] : null,
     async ([, users]: [string, User[]]) => {
     const updateList = async (item: User) => {
@@ -54,10 +54,10 @@ export function useBiliUsers(enabled = true) {
   }, { dedupingInterval: 60_000, revalidateOnFocus: false });
 
   return {
-    isLoading: isLoading || profilesLoading,
+    isLoading,
     isError: error,
     // 没有账号时直接派生为空列表,不必等 effect 里再 setState 一轮
-    biliUsers: !enabled || !data?.length ? NO_USERS : list ?? NO_USERS,
+    biliUsers: !enabled || !data?.length ? NO_USERS : list ?? data ?? NO_USERS,
   };
 }
 
