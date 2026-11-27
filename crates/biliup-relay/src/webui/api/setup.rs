@@ -939,7 +939,7 @@ mod setup_tests {
         crate::storage::init(&dir.path().join("data"), Some(&dir.path().join("key"))).unwrap();
         install_accounts(&[(3, 42), (7, 91)]);
 
-        let guessed = save_setup_config(Json(payload(json!({})))).await.unwrap().0;
+        let guessed = save_setup_config(Json(payload(json!({})))).await.unwrap();
         assert!(!guessed.success);
         assert_eq!(
             guessed.message.as_deref(),
@@ -949,15 +949,13 @@ mod setup_tests {
 
         let stale = save_setup_config(Json(payload(json!({"account_id": 99}))))
             .await
-            .unwrap()
-            .0;
+            .unwrap();
         assert!(!stale.success);
         assert_eq!(stale.message.as_deref(), Some("请选择有效的 B 站账号"));
 
         let saved = save_setup_config(Json(payload(json!({"account_id": 7}))))
             .await
-            .unwrap()
-            .0;
+            .unwrap();
         assert!(saved.success, "{:?}", saved.message);
         let config = crate::storage::global()
             .unwrap()
