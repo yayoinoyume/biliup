@@ -134,13 +134,13 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
         <dl className={relayStyles.kv}>
           <dt className={relayStyles.kvKey}>存储状态</dt>
           <dd className={relayStyles.kvValue}>{ready ? '已就绪' : '不可用'}</dd>
-          <dt className={relayStyles.kvKey}>结构版本</dt>
+          <dt className={relayStyles.kvKey}>备份版本</dt>
           <dd className={relayStyles.kvValue}>{status?.ready === true ? status.schema : '—'}</dd>
-          <dt className={relayStyles.kvKey}>SQLite</dt>
+          <dt className={relayStyles.kvKey}>数据库</dt>
           <dd className={relayStyles.kvValue}>
             {status?.ready === true ? status.sqlite_version : '—'}
           </dd>
-          <dt className={relayStyles.kvKey}>配置文档</dt>
+          <dt className={relayStyles.kvKey}>配置数据</dt>
           <dd className={relayStyles.kvValue}>
             {status?.ready === true ? (configured ? '已写入' : '尚未写入') : '—'}
           </dd>
@@ -171,7 +171,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
             下载加密备份
           </Button>
           <Text type="tertiary" size="small">
-            导出内容包含全部文档与登录信息，请按敏感文件保管。
+            导出内容包含全部数据与登录信息，请按敏感文件保管。
           </Text>
         </div>
       </SettingsCard>
@@ -185,8 +185,8 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
             className={relayStyles.banner}
             type="warning"
             closeIcon={null}
-            title="当前实例已存在配置，不能恢复备份"
-            description="当前实例已存在配置；为防误覆盖生产数据，后端仅允许在空数据目录（首次安装/清空数据目录后）恢复加密备份。如需导出当前配置，请使用上方「导出加密备份」。"
+            title="当前已有数据，不能恢复备份"
+            description="当前已有数据；为了避免覆盖现有内容，只允许在全新安装或清空数据后恢复备份。如需导出当前配置，请使用上方「导出加密备份」。"
           />
         ) : null}
 
@@ -250,7 +250,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
           onCancel={() => setConfirmOpen(false)}
         >
           <Text>
-            将用 {file.name}（{formatBytes(file.size)}）覆盖当前全部数据，包括配置、登录信息与统计文档。恢复过程不可撤销，确定继续吗？
+            将用 {file.name}（{formatBytes(file.size)}）覆盖当前全部数据，包括配置、登录信息与统计数据。恢复过程不可撤销，确定继续吗？
           </Text>
         </FormDialog>
       ) : null}

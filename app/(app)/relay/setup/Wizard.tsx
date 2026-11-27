@@ -569,7 +569,7 @@ export default function Wizard() {
               description="这里只配置转播服务自身的参数，不再单独设置上游面板密码。用户登录、角色与权限请在账号中心里管理。"
             />
             <div className={pageStyles.formGrid}>
-              <Field label="检查间隔（秒）" hint="直播状态轮询的最短间隔，默认 60 秒。">
+              <Field label="检查间隔（秒）" hint="多久检查一次直播状态，默认 60 秒。">
                 <InputNumber
                   value={form.intervalSeconds > 0 ? form.intervalSeconds : undefined}
                   min={5}
@@ -606,7 +606,7 @@ export default function Wizard() {
               value={form.holodexApiKey}
               onChange={(value) => update('holodexApiKey', value)}
               configured={false}
-              help="用于公开的 Holodex 接口；留空可稍后在设置页配置。"
+              help="用于公开的 Holodex 密钥；留空可稍后在设置页配置。"
             />
             <MaskedSecretInput
               label="Holodex JWT"
@@ -615,7 +615,7 @@ export default function Wizard() {
               configured={false}
               multiline
               rows={3}
-              help="收藏列表与账号相关接口需要 JWT；留空可稍后在设置页配置。"
+              help="收藏列表与账号相关功能需要登录令牌（JWT）；留空可稍后在设置页配置。"
             />
             <div className={pageStyles.formGrid}>
               <Field label="YouTube 代理" hint="形如 http://127.0.0.1:7890；留空表示直连。">

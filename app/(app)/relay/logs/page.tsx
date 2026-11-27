@@ -175,7 +175,7 @@ export default function RelayLogsPage() {
           <div className={relay.toolbar}>
             <span className={styles.switchLine}>
               <Text type="tertiary" size="small">
-                每 5 秒轮询
+                每 5 秒刷新一次
               </Text>
               <Switch size="small" checked={!paused} onChange={(value) => setPaused(!value)} />
             </span>

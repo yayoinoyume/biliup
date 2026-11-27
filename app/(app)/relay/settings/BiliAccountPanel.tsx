@@ -294,7 +294,7 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
                 : '配置与账号已就绪'
               : '—'}
           </dd>
-          <dt className={relayStyles.kvKey}>存储错误</dt>
+          <dt className={relayStyles.kvKey}>数据存储状态</dt>
           <dd className={relayStyles.kvValue}>{setup.data?.storage_error ?? '无'}</dd>
         </dl>
 

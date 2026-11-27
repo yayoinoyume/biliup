@@ -55,7 +55,7 @@ function PlayerFilterForm({
       <SaveErrorBanner error={state.error} onReload={onReload} />
       <Text type="tertiary" size="small">
         {creating
-          ? '将按新文档创建（版本号 0）；若别的窗口刚创建过会返回冲突，请先刷新再编辑。'
+          ? '将新建过滤词（版本号 0）；若别的窗口刚创建过会提示冲突，请先刷新再编辑。'
           : '每行一条过滤词；保存时带当前版本号 ' + data.revision + '，冲突时请先重新加载。'}
       </Text>
       <TextArea
@@ -93,7 +93,7 @@ export default function PlayerFilter() {
   return (
     <SettingsCard
       title="播放器过滤词"
-      description="存于加密存储的 invalid_words.txt，前端只按版本号做比较交换，不会盲目覆盖别人的修改。"
+      description="过滤词保存在服务端；页面按版本号避免互相覆盖。"
     >
       {filter.error ? (
         <RelayError error={filter.error} title="过滤词加载失败" onRetry={reload} />
@@ -126,9 +126,9 @@ export default function PlayerFilter() {
       {!filter.data && filter.error && !creating ? (
         <>
           <div className={styles.actions}>
-            <Button onClick={() => setCreating(true)}>按新文档（版本号 0）创建</Button>
+            <Button onClick={() => setCreating(true)}>新建过滤词（版本号 0）</Button>
             <Text type="tertiary" size="small">
-              读取失败可能是网络或权限问题；确认要新建过滤词文档时再继续。
+              读取失败可能是网络或权限问题；确认要新建过滤词时再继续。
             </Text>
           </div>
         </>

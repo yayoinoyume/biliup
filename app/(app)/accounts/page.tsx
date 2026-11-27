@@ -242,7 +242,7 @@ function YoutubeAccountsPanel() {
             type="warning"
             closeIcon={null}
             title="转播服务尚未配置"
-            description="YouTube 账号保存在转播账号存储里；先完成首次设置，再回来管理账号。"
+            description="YouTube 账号保存在账号中心里；先完成首次设置，再回来管理账号。"
           />
           <Text type="tertiary" size="small">
             {relayErrorMessage(accounts.error)}
@@ -479,7 +479,7 @@ function AddYoutubeAccountDialog({
             spellCheck={false}
             placeholder="# Netscape HTTP Cookie File"
             rules={[{ required: true, message: '粘贴 Netscape 格式的 cookies.txt 内容' }]}
-            extraText="由服务器访问 YouTube 使用；内容加密保存，接口不回传。"
+            extraText="由服务器访问 YouTube 使用；内容加密保存，保存后不会再显示原文。"
           />
         )}
       </Form>
@@ -498,7 +498,7 @@ export default function AccountsPage() {
       <PageHeader
         icon={<IconUserGroup size="large" />}
         title="账号中心"
-        description="B 站账号与 YouTube 账号集中管理；YouTube 账号保存在转播账号存储里。"
+        description="B 站账号与 YouTube 账号集中管理；两类账号都保存在账号中心。"
       />
       <div className={dc.content}>
         <Tabs

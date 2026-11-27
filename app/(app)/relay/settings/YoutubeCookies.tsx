@@ -179,7 +179,7 @@ export default function YoutubeCookies() {
         <Text type="tertiary" size="small">
           {selected
             ? '现在用的是账号「' + selected.label + '」，这份旧版登录信息不会被读取。'
-            : '浏览器导出的 cookies.txt 直接粘贴到下面；提交后端会逐行校验 Netscape 格式，格式不对不会保存。'}
+            : '浏览器导出的 cookies.txt 直接粘贴到下面；提交后会逐行检查 Netscape 格式，格式不对不会保存。'}
         </Text>
 
         <TextArea
