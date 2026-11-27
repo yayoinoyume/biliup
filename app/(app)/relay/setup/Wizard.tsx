@@ -6,6 +6,7 @@ import {
   Checkbox,
   Input,
   InputNumber,
+  Select,
   Steps,
   Switch,
   Tag,
@@ -47,6 +48,8 @@ import { RELAY_SETUP_KEY, RELAY_SETUP_LOGIN_KEY } from '../components/keys'
 import { Field } from '../components/ui'
 
 const { Text, Title } = Typography
+
+const accountLabel = (account: User) => account.name?.trim() || `账号 #${account.id}`
 
 interface WizardForm {
   room: number
@@ -128,7 +131,11 @@ export default function Wizard() {
   const areaGroups = useSWR(RELAY_AREA_GROUPS_KEY, loadRelayAreaGroups, {
     revalidateOnFocus: false,
   })
+  const [accountId, setAccountId] = useState<number | null>(null)
   const { biliUsers } = useBiliUsers()
+  const hostAccounts = biliUsers as User[]
+  const hostAccount = hostAccounts.find((account) => account.id === accountId) ?? null
+  const hostAccountLabel = hostAccount ? accountLabel(hostAccount) : ''
 
   useEffect(() => {
     aliveRef.current = true
@@ -150,7 +157,7 @@ export default function Wizard() {
     if (readingRoom) return
     setReadingRoom(true)
     try {
-      const room = await relaySetupBiliRoom()
+      const room = await relaySetupBiliRoom(accountId)
       if (room !== null) update('room', room)
       else Toast.info('账号还没有直播间，请手动填写房间号')
     } catch (error) {
@@ -313,6 +320,7 @@ export default function Wizard() {
       interval: form.intervalSeconds,
       anti_collision: form.antiCollision,
       enable_lol_monitor: form.enableLolMonitor,
+      account_id: accountId,
       youtube_enable_monitor: form.youtubeEnabled,
       twitch_enable_monitor: form.twitchEnabled,
       niconico_enable_monitor: form.niconicoEnabled,
@@ -341,6 +349,11 @@ export default function Wizard() {
   }
 
   const save = async () => {
+    if (hostAccounts.length > 0 && accountId === null) {
+      Toast.error('请选择转播使用的 B 站账号')
+      setStep(0)
+      return
+    }
     if (form.room <= 0) {
       Toast.error('请填写直播间号')
       setStep(0)
@@ -384,11 +397,6 @@ export default function Wizard() {
   }
 
   const loginCheckedIn = login.data?.logged_in === true
-  const hostAccounts = biliUsers as User[]
-  const hostAccount = hostAccounts[0] ?? null
-  const hostAccountLabel = hostAccount
-    ? hostAccount.name?.trim() || `账号 #${hostAccount.id}`
-    : ''
 
   return (
     <div className={styles.stack}>
@@ -448,20 +456,24 @@ export default function Wizard() {
                 color={
                   hostAccount
                     ? 'green'
-                    : login.error
-                      ? 'grey'
-                      : loginCheckedIn
-                        ? 'green'
-                        : 'orange'
+                    : hostAccounts.length > 0
+                      ? 'orange'
+                      : login.error
+                        ? 'grey'
+                        : loginCheckedIn
+                          ? 'green'
+                          : 'orange'
                 }
               >
                 {hostAccount
                   ? '已选择 B 站账号'
-                  : login.error
-                    ? '登录状态未知'
-                    : loginCheckedIn
-                      ? 'B 站账号已登录'
-                      : '尚未登录'}
+                  : hostAccounts.length > 0
+                    ? '尚未选择账号'
+                    : login.error
+                      ? '登录状态未知'
+                      : loginCheckedIn
+                        ? 'B 站账号已登录'
+                        : '尚未登录'}
               </Tag>
             </div>
             {hostAccount ? (
@@ -470,11 +482,15 @@ export default function Wizard() {
                 type="success"
                 closeIcon={null}
                 title={`将使用 B 站账号：${hostAccountLabel}`}
-                description={
-                  hostAccounts.length > 1
-                    ? `保存后转播会使用这个 B 站账号；房间号请手动填写。保存后可在转播设置里更换（账号中心共 ${hostAccounts.length} 个，默认用第一个）。`
-                    : '保存后转播会使用这个 B 站账号；房间号请手动填写。保存后可在转播设置里更换。'
-                }
+                description="保存后转播会使用这个 B 站账号；房间号可以点下面的「从账号读取房间号」自动填，也可以手动填写。保存后可在转播设置里更换。"
+              />
+            ) : hostAccounts.length > 0 ? (
+              <Banner
+                className={styles.banner}
+                type="info"
+                closeIcon={null}
+                title="请先选择转播使用的 B 站账号"
+                description={`账号中心有 ${hostAccounts.length} 个 B 站账号；这里选的账号用于转播开播与弹幕，不选无法保存首次设置。`}
               />
             ) : login.error ? (
               <RelayError
@@ -497,8 +513,32 @@ export default function Wizard() {
                 }
               />
             )}
+            {hostAccounts.length > 0 ? (
+              <Field
+                label="转播使用哪个 B 站账号"
+                hint="投稿模板用哪个账号在「投稿管理」里单独选择，不会跟这里的转播账号联动。"
+              >
+                <Select
+                  value={accountId ?? undefined}
+                  optionList={hostAccounts.map((account) => ({
+                    label: accountLabel(account),
+                    value: account.id,
+                  }))}
+                  placeholder="请选择 B 站账号"
+                  style={{ width: '100%' }}
+                  onChange={(value) => {
+                    setAccountId(typeof value === 'number' ? value : null)
+                  }}
+                  aria-label="转播使用哪个 B 站账号"
+                />
+              </Field>
+            ) : (
+              <Text type="tertiary" size="small">
+                账号中心还没有 B 站账号；可以先用下面的二维码登录一个，或去「管理账号」添加。
+              </Text>
+            )}
             <div className={styles.toolbar}>
-              {hostAccount ? null : (
+              {hostAccounts.length === 0 ? (
                 <Button
                   theme="solid"
                   type="primary"
@@ -508,10 +548,10 @@ export default function Wizard() {
                 >
                   {polling ? '等待扫码…' : qr ? '重新获取二维码' : '用 B 站扫码登录'}
                 </Button>
-              )}
+              ) : null}
               <Button
                 loading={readingRoom}
-                disabled={!loginCheckedIn}
+                disabled={!hostAccount && !loginCheckedIn}
                 onClick={() => void fillRoomFromAccount()}
               >
                 从账号读取房间号
@@ -537,9 +577,11 @@ export default function Wizard() {
             <Field
               label="直播间号"
               hint={
-                hostAccount && !loginCheckedIn
-                  ? '保存后会使用所选的 B 站账号；房间号请手动填写。'
-                  : '登录后可以从账号自动读取；也可以直接填写。'
+                hostAccount
+                  ? '可以点「从账号读取房间号」自动填写；也可以手动填写。'
+                  : hostAccounts.length > 0
+                    ? '先选择转播账号，再用「从账号读取房间号」自动填写。'
+                    : '登录后可以从账号自动读取；也可以直接填写。'
               }
             >
               <InputNumber

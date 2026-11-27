@@ -3,6 +3,7 @@
 //! 面板自身的登录态由宿主接管；本模块只保留与 B 站账号有关的扫码链路。
 
 use axum::Json;
+use axum::extract::Query;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use super::ApiResponse;
@@ -39,6 +40,35 @@ fn setup_missing_files(
     missing_files
 }
 
+/// 宿主账号中心当前的账号；没有注入来源时为空。
+async fn host_accounts() -> Result<Vec<biliup_accounts::AccountMeta>, StatusCode> {
+    tokio::task::spawn_blocking(|| {
+        crate::credential_bridge::account_provider()
+            .map(|provider| provider.list())
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// 账号列表里的指定行号；None 说明账号已被删掉，调用方必须拒绝而不是回退。
+async fn host_account(
+    account_id: i64,
+) -> Result<Option<biliup_accounts::AccountMeta>, StatusCode> {
+    Ok(host_accounts()
+        .await?
+        .into_iter()
+        .find(|account| account.id == account_id))
+}
+
+/// 转播自己加密库里的 cookies.json：没有它就只能靠向导里选中的宿主账号。
+async fn relay_has_cookies() -> Result<bool, StatusCode> {
+    tokio::task::spawn_blocking(|| crate::storage::contains("cookies.json"))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub async fn check_setup() -> Result<Json<SetupStatus>, StatusCode> {
     let store = match tokio::task::spawn_blocking(crate::storage::global).await {
         Ok(Ok(store)) => store,
@@ -67,12 +97,7 @@ pub async fn check_setup() -> Result<Json<SetupStatus>, StatusCode> {
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let has_host_account = tokio::task::spawn_blocking(|| {
-        crate::credential_bridge::account_provider()
-            .is_some_and(|provider| !provider.list().is_empty())
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let has_host_account = !host_accounts().await?.is_empty();
     let missing_files =
         setup_missing_files(has_config, account_id, has_host_account, has_standalone_cookies);
 
@@ -99,6 +124,8 @@ pub struct SetupConfigRequest {
     enable_danmaku_command: bool,
     interval: u64,
     anti_collision: bool,
+    #[serde(default)]
+    account_id: Option<i64>,
     youtube_enable_monitor: Option<bool>,
     youtube_channel_name: Option<String>,
     youtube_channel_id: Option<String>,
@@ -286,31 +313,6 @@ fn setup_enables_monitor(
         || (!previous.bililive.enable_danmaku_command && current.bililive.enable_danmaku_command)
 }
 
-async fn adopt_host_account(cfg: &mut crate::config::Config) -> Result<(), StatusCode> {
-    if cfg.bililive.account_id.is_some() {
-        return Ok(());
-    }
-    let has_standalone_cookies =
-        tokio::task::spawn_blocking(|| crate::storage::contains("cookies.json"))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if has_standalone_cookies {
-        return Ok(());
-    }
-    let first_account = tokio::task::spawn_blocking(|| {
-        crate::credential_bridge::account_provider()
-            .and_then(|provider| provider.list().into_iter().next())
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if let Some(account) = first_account {
-        cfg.bililive.account_id = Some(account.id);
-        cfg.bililive.account_mid = Some(account.mid);
-    }
-    Ok(())
-}
-
 pub async fn save_setup_config(
     Json(mut payload): Json<SetupConfigRequest>,
 ) -> Result<ApiResponse<()>, StatusCode> {
@@ -344,7 +346,20 @@ pub async fn save_setup_config(
         }
         default_first_install_config()
     };
-    adopt_host_account(&mut cfg).await?;
+    if let Some(account_id) = payload.account_id {
+        let Some(account) = host_account(account_id).await? else {
+            return Ok(invalid("请选择有效的 B 站账号".into()));
+        };
+        cfg.bililive.account_id = Some(account.id);
+        cfg.bililive.account_mid = Some(account.mid);
+    }
+    // 有宿主账号却没有选定转播账号时不猜第一个：猜错会把直播开到别人的房间。
+    if cfg.bililive.account_id.is_none()
+        && !relay_has_cookies().await?
+        && !host_accounts().await?.is_empty()
+    {
+        return Ok(invalid("请选择转播使用的 B 站账号".into()));
+    }
     let previous_cfg = cfg.clone();
 
     cfg.auto_cover = payload.auto_cover;
@@ -597,21 +612,32 @@ pub async fn poll_login(
     }
 }
 
-/// 预填向导的直播间字段：第 1 步已把账号写入磁盘，这里把 uid 换成房间号。
+#[derive(Deserialize)]
+pub struct BiliRoomQuery {
+    #[serde(default)]
+    account_id: Option<i64>,
+}
+
+/// 预填向导的直播间字段：优先用向导里选中的账号，其次用已保存的 B 站凭据，把 uid 换成房间号。
 /// None 表示仍需询问用户，例如账号没有直播间或请求失败。
-pub async fn resolve_bili_room() -> Result<Json<ApiResponse<Option<i64>>>, StatusCode> {
-    let uid = crate::config::load_config()
-        .await
-        .ok()
-        .and_then(|cfg| {
-            cfg.bililive
-                .credentials
-                .dede_user_id
-                .trim()
-                .parse::<u64>()
-                .ok()
-        })
-        .filter(|uid| *uid > 0);
+pub async fn resolve_bili_room(
+    Query(query): Query<BiliRoomQuery>,
+) -> Result<Json<ApiResponse<Option<i64>>>, StatusCode> {
+    let uid = match query.account_id {
+        Some(account_id) => host_account(account_id).await?.map(|account| account.mid),
+        None => crate::config::load_config()
+            .await
+            .ok()
+            .and_then(|cfg| {
+                cfg.bililive
+                    .credentials
+                    .dede_user_id
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .filter(|uid| *uid > 0),
+    };
 
     let room = match uid {
         Some(uid) => crate::plugins::bilibili::room_id_by_uid(uid)
@@ -870,6 +896,87 @@ mod setup_tests {
         let status = check_setup().await.unwrap().0;
         assert!(status.missing_files.is_empty());
         assert!(!status.needs_setup);
+
+        crate::credential_bridge::set_account_provider(None);
+    }
+
+    struct FixedAccounts(Vec<biliup_accounts::AccountMeta>);
+
+    impl biliup_accounts::AccountProvider for FixedAccounts {
+        fn list(&self) -> Vec<biliup_accounts::AccountMeta> {
+            self.0.clone()
+        }
+
+        fn resolve(&self, id: i64) -> Option<serde_json::Value> {
+            self.0
+                .iter()
+                .any(|account| account.id == id)
+                .then(|| serde_json::json!({}))
+        }
+    }
+
+    fn install_accounts(accounts: &[(i64, u64)]) {
+        crate::credential_bridge::set_account_provider(Some(std::sync::Arc::new(
+            FixedAccounts(
+                accounts
+                    .iter()
+                    .map(|(id, mid)| biliup_accounts::AccountMeta {
+                        id: *id,
+                        mid: *mid,
+                        name: None,
+                    })
+                    .collect(),
+            ),
+        )));
+    }
+
+    #[tokio::test]
+    async fn setup_requires_an_explicit_account_and_saves_the_chosen_one() {
+        let _guard = crate::storage::lock_test_global();
+        let _reset = StoreReset;
+        let _accounts = crate::credential_bridge::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::init(&dir.path().join("data"), Some(&dir.path().join("key"))).unwrap();
+        install_accounts(&[(3, 42), (7, 91)]);
+
+        let guessed = save_setup_config(Json(payload(json!({})))).await.unwrap().0;
+        assert!(!guessed.success);
+        assert_eq!(
+            guessed.message.as_deref(),
+            Some("请选择转播使用的 B 站账号")
+        );
+        assert!(!crate::storage::contains("config.json").unwrap());
+
+        let stale = save_setup_config(Json(payload(json!({"account_id": 99}))))
+            .await
+            .unwrap()
+            .0;
+        assert!(!stale.success);
+        assert_eq!(stale.message.as_deref(), Some("请选择有效的 B 站账号"));
+
+        let saved = save_setup_config(Json(payload(json!({"account_id": 7}))))
+            .await
+            .unwrap()
+            .0;
+        assert!(saved.success, "{:?}", saved.message);
+        let config = crate::storage::global()
+            .unwrap()
+            .read("config.json")
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(
+            config
+                .pointer("/bililive/account_id")
+                .and_then(serde_json::Value::as_i64),
+            Some(7)
+        );
+        assert_eq!(
+            config
+                .pointer("/bililive/account_mid")
+                .and_then(serde_json::Value::as_u64),
+            Some(91)
+        );
 
         crate::credential_bridge::set_account_provider(None);
     }

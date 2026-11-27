@@ -713,6 +713,7 @@ export interface RelaySetupConfigRequest {
   interval: number
   anti_collision: boolean
   enable_lol_monitor: boolean
+  account_id?: number | null
   youtube_enable_monitor?: boolean
   youtube_channel_name?: string
   youtube_channel_id?: string
@@ -1349,10 +1350,11 @@ export async function relaySetupPollLogin(
   return unwrapData(envelope)
 }
 
-/** GET /v1/relay/setup/bili-room —— 用已登录账号的 uid 反推房间号；`null` 表示仍需手填。 */
-export async function relaySetupBiliRoom(): Promise<number | null> {
+/** GET /v1/relay/setup/bili-room —— 用选中账号或已登录账号的 uid 反推房间号；`null` 表示仍需手填。 */
+export async function relaySetupBiliRoom(accountId?: number | null): Promise<number | null> {
+  const query = typeof accountId === 'number' ? `?account_id=${accountId}` : ''
   const envelope = await relayGetJson<RelayEnvelope<number | null>>(
-    `${RELAY}/setup/bili-room`,
+    `${RELAY}/setup/bili-room${query}`,
   )
   return unwrapNullable(envelope)
 }
