@@ -33,6 +33,8 @@ import type {
   RelaySetupArea,
   RelaySetupConfigRequest,
 } from '@/app/lib/relay'
+import type { User } from '@/app/lib/api-streamer'
+import { useBiliUsers } from '@/app/lib/use-streamers'
 import AreaCatalogPicker, {
   RELAY_AREA_GROUPS_KEY,
   loadRelayAreaGroups,
@@ -126,6 +128,7 @@ export default function Wizard() {
   const areaGroups = useSWR(RELAY_AREA_GROUPS_KEY, loadRelayAreaGroups, {
     revalidateOnFocus: false,
   })
+  const { biliUsers } = useBiliUsers()
 
   useEffect(() => {
     aliveRef.current = true
@@ -381,12 +384,17 @@ export default function Wizard() {
   }
 
   const loginCheckedIn = login.data?.logged_in === true
+  const hostAccounts = biliUsers as User[]
+  const hostAccount = hostAccounts[0] ?? null
+  const hostAccountLabel = hostAccount
+    ? hostAccount.name?.trim() || `账号 #${hostAccount.id}`
+    : ''
 
   return (
     <div className={styles.stack}>
       <section className={styles.card}>
         <Steps current={step} type="basic" size="small">
-          <Steps.Step title="B 站账号" description="扫码登录与房间号" />
+          <Steps.Step title="B 站账号" description="账号与房间号" />
           <Steps.Step title="基础参数" description="检测间隔与密钥" />
           <Steps.Step title="频道与分区" description="监控目标与初始名单" />
         </Steps>
@@ -432,11 +440,40 @@ export default function Wizard() {
               <Title heading={6} style={{ margin: 0 }}>
                 第 1 步：B 站账号与直播间
               </Title>
-              <Tag size="small" color={login.error ? 'grey' : loginCheckedIn ? 'green' : 'orange'}>
-                {login.error ? '登录状态未知' : loginCheckedIn ? 'B 站账号已登录' : '尚未登录'}
+              <Tag
+                size="small"
+                color={
+                  hostAccount
+                    ? 'green'
+                    : login.error
+                      ? 'grey'
+                      : loginCheckedIn
+                        ? 'green'
+                        : 'orange'
+                }
+              >
+                {hostAccount
+                  ? '宿主账号已配置'
+                  : login.error
+                    ? '登录状态未知'
+                    : loginCheckedIn
+                      ? 'B 站账号已登录'
+                      : '尚未登录'}
               </Tag>
             </div>
-            {login.error ? (
+            {hostAccount ? (
+              <Banner
+                className={styles.banner}
+                type="success"
+                closeIcon={null}
+                title="宿主账号已配置"
+                description={
+                  hostAccounts.length > 1
+                    ? `转播将使用宿主账号「${hostAccountLabel}」（共 ${hostAccounts.length} 个，默认用第一个），不需要扫码。房间号请手动填写，保存后可在转播设置里更换账号。`
+                    : `转播将使用宿主账号「${hostAccountLabel}」，不需要扫码。房间号请手动填写，保存后可在转播设置里修改。`
+                }
+              />
+            ) : login.error ? (
               <RelayError
                 error={login.error}
                 title="B 站登录状态读取失败"
@@ -465,9 +502,19 @@ export default function Wizard() {
                 disabled={polling}
                 onClick={() => void requestQrCode()}
               >
-                {polling ? '等待扫码…' : qr ? '重新获取二维码' : '获取登录二维码'}
+                {polling
+                  ? '等待扫码…'
+                  : hostAccount
+                    ? '改用转播底座扫码（可选）'
+                    : qr
+                      ? '重新获取二维码'
+                      : '获取登录二维码'}
               </Button>
-              <Button loading={readingRoom} onClick={() => void fillRoomFromAccount()}>
+              <Button
+                loading={readingRoom}
+                disabled={!loginCheckedIn}
+                onClick={() => void fillRoomFromAccount()}
+              >
                 从账号读取房间号
               </Button>
               <Link href="/relay/settings" className={pageStyles.textLink}>
@@ -488,7 +535,14 @@ export default function Wizard() {
                     : pollResult.message}
               </Text>
             ) : null}
-            <Field label="直播间号" hint="登录后可以从账号自动读取；也可以直接填写。">
+            <Field
+              label="直播间号"
+              hint={
+                hostAccount && !loginCheckedIn
+                  ? '保存后会使用宿主账号；房间号请手动填写。'
+                  : '登录后可以从账号自动读取；也可以直接填写。'
+              }
+            >
               <InputNumber
                 value={form.room > 0 ? form.room : undefined}
                 min={1}

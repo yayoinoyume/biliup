@@ -115,7 +115,12 @@ export default function RelayOverviewPage() {
               description={
                 <div className={styles.errorBody}>
                   <Text>
-                    缺少：{setup.data.missing_files.join('、') || '配置文件'}。完成扫码登录与基础参数后即可开播。
+                    {'缺少：' +
+                      (setup.data.missing_files.join('、') || '配置文件') +
+                      '。' +
+                      (setup.data.missing_files.includes('cookies.json')
+                        ? '完成扫码登录与基础参数后即可开播。'
+                        : '完成基础参数后即可开播。')}
                   </Text>
                   <div className={styles.errorActions}>
                     <Link href="/relay/setup" className={pageStyles.textLink}>

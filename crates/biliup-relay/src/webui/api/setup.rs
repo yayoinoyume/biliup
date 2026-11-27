@@ -23,6 +23,22 @@ pub struct SetupStatus {
     storage_error: Option<String>,
 }
 
+fn setup_missing_files(
+    has_config: bool,
+    account_id: Option<i64>,
+    has_host_account: bool,
+    has_standalone_cookies: bool,
+) -> Vec<String> {
+    let mut missing_files = Vec::new();
+    if !has_config {
+        missing_files.push("config.json".into());
+    }
+    if account_id.is_none() && !has_host_account && !has_standalone_cookies {
+        missing_files.push("cookies.json".into());
+    }
+    missing_files
+}
+
 pub async fn check_setup() -> Result<Json<SetupStatus>, StatusCode> {
     let store = match tokio::task::spawn_blocking(crate::storage::global).await {
         Ok(Ok(store)) => store,
@@ -38,19 +54,27 @@ pub async fn check_setup() -> Result<Json<SetupStatus>, StatusCode> {
             }));
         }
     };
-    let missing_files = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
-        let mut missing_files = Vec::new();
-        if store.revision("config.json")?.is_none() {
-            missing_files.push("config.json".into());
-        }
-        if store.revision("cookies.json")?.is_none() {
-            missing_files.push("cookies.json".into());
-        }
-        Ok(missing_files)
+    let (has_config, account_id, has_standalone_cookies) =
+        tokio::task::spawn_blocking(move || -> std::io::Result<(bool, Option<i64>, bool)> {
+            let config = store.read("config.json")?;
+            let account_id = config
+                .as_ref()
+                .and_then(|document| document.value.pointer("/bililive/account_id"))
+                .and_then(serde_json::Value::as_i64);
+            let has_cookies = store.revision("cookies.json")?.is_some();
+            Ok((config.is_some(), account_id, has_cookies))
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let has_host_account = tokio::task::spawn_blocking(|| {
+        crate::credential_bridge::account_provider()
+            .is_some_and(|provider| !provider.list().is_empty())
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let missing_files =
+        setup_missing_files(has_config, account_id, has_host_account, has_standalone_cookies);
 
     let needs_setup = !missing_files.is_empty();
 
@@ -262,6 +286,31 @@ fn setup_enables_monitor(
         || (!previous.bililive.enable_danmaku_command && current.bililive.enable_danmaku_command)
 }
 
+async fn adopt_host_account(cfg: &mut crate::config::Config) -> Result<(), StatusCode> {
+    if cfg.bililive.account_id.is_some() {
+        return Ok(());
+    }
+    let has_standalone_cookies =
+        tokio::task::spawn_blocking(|| crate::storage::contains("cookies.json"))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if has_standalone_cookies {
+        return Ok(());
+    }
+    let first_account = tokio::task::spawn_blocking(|| {
+        crate::credential_bridge::account_provider()
+            .and_then(|provider| provider.list().into_iter().next())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Some(account) = first_account {
+        cfg.bililive.account_id = Some(account.id);
+        cfg.bililive.account_mid = Some(account.mid);
+    }
+    Ok(())
+}
+
 pub async fn save_setup_config(
     Json(mut payload): Json<SetupConfigRequest>,
 ) -> Result<ApiResponse<()>, StatusCode> {
@@ -295,6 +344,7 @@ pub async fn save_setup_config(
         }
         default_first_install_config()
     };
+    adopt_host_account(&mut cfg).await?;
     let previous_cfg = cfg.clone();
 
     cfg.auto_cover = payload.auto_cover;
@@ -598,6 +648,25 @@ mod setup_tests {
         cfg
     }
 
+    #[test]
+    fn missing_cookies_only_without_account_and_host_accounts() {
+        assert_eq!(
+            setup_missing_files(false, None, true, false),
+            vec!["config.json".to_string()]
+        );
+        assert!(setup_missing_files(true, None, true, false).is_empty());
+        assert_eq!(
+            setup_missing_files(false, None, false, false),
+            vec!["config.json".to_string(), "cookies.json".to_string()]
+        );
+        assert_eq!(
+            setup_missing_files(true, None, false, false),
+            vec!["cookies.json".to_string()]
+        );
+        assert!(setup_missing_files(true, Some(7), false, false).is_empty());
+        assert!(setup_missing_files(true, None, false, true).is_empty());
+    }
+
     #[tokio::test]
     async fn none_skips_stale_validation_and_preserves_all_platform_preferences() {
         let mut request = payload(json!({
@@ -763,5 +832,25 @@ mod setup_tests {
         let status = check_login_status().await.unwrap().0;
         assert!(status.logged_in, "写入 cookies.json 后必须报已登录");
         assert_eq!(status.message, "已登录");
+    }
+
+    #[tokio::test]
+    async fn check_setup_accepts_a_host_account_without_relay_cookies() {
+        let _guard = crate::storage::lock_test_global();
+        let _reset = StoreReset;
+        let _accounts = crate::credential_bridge::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::init(&dir.path().join("data"), Some(&dir.path().join("key"))).unwrap();
+        crate::credential_bridge::testing::install([(
+            3,
+            crate::credential_bridge::testing::account_document(42, "synthetic-sessdata"),
+        )]);
+
+        let status = check_setup().await.unwrap().0;
+        assert_eq!(status.missing_files, vec!["config.json".to_string()]);
+        assert!(status.needs_setup);
+        assert!(!status.missing_files.iter().any(|name| name == "cookies.json"));
+
+        crate::credential_bridge::set_account_provider(None);
     }
 }

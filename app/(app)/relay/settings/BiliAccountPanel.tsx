@@ -55,6 +55,11 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
   const [accountId, setAccountId] = useState<number | null>(data?.account_id ?? null)
 
   const savedAccountId = data?.account_id ?? null
+  const savedAccount = accounts.find((account) => account.id === savedAccountId)
+  const savedAccountLabel =
+    savedAccountId === null
+      ? ''
+      : savedAccount?.name?.trim() || '账号 #' + savedAccountId
   const dirty = data !== undefined && accountId !== savedAccountId
   const accountsReady = canPickAccount && !usersLoading && !usersError
   const missingFromList =
@@ -157,10 +162,17 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
       ) : null}
       <SettingsCard
         title="B 站转播账号"
-        description="扫码登录写的是转播底座自己的加密 B 站凭据，和宿主 biliup 的账号登录是两套数据，互不覆盖。"
+        description="默认使用账号中心选中的宿主 B 站账号；扫码登录只是回退到转播底座自己的加密凭据，两套数据互不覆盖。"
         extra={
-          <Tag size="small" color={login.data?.logged_in ? 'green' : 'grey'}>
-            {login.data?.logged_in ? '已登录' : '未登录'}
+          <Tag
+            size="small"
+            color={savedAccountId !== null || login.data?.logged_in ? 'green' : 'grey'}
+          >
+            {savedAccountId !== null
+              ? '已配置宿主账号'
+              : login.data?.logged_in
+                ? '已登录'
+                : '未登录'}
           </Tag>
         }
       >
@@ -265,7 +277,11 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
 
         <dl className={relayStyles.kv}>
           <dt className={relayStyles.kvKey}>登录状态</dt>
-          <dd className={relayStyles.kvValue}>{login.data?.message ?? '—'}</dd>
+          <dd className={relayStyles.kvValue}>
+            {savedAccountId !== null
+              ? '宿主账号「' + savedAccountLabel + '」'
+              : login.data?.message ?? '—'}
+          </dd>
           <dt className={relayStyles.kvKey}>直播间号</dt>
           <dd className={relayStyles.kvValue}>
             {room.data === null ? '暂时取不到，可在向导里手填' : room.data ?? '—'}
@@ -275,7 +291,7 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
             {setup.data
               ? setup.data.needs_setup
                 ? '缺少 ' + setup.data.missing_files.join('、')
-                : '配置与 Cookie 均已就绪'
+                : '配置与账号已就绪'
               : '—'}
           </dd>
           <dt className={relayStyles.kvKey}>存储错误</dt>
@@ -292,7 +308,7 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
         </div>
 
         <Text type="tertiary" size="small">
-          首次使用状态取决于配置与登录凭据是否已写入；缺文件时请先在转播向导完成首次配置。
+          首次使用状态取决于配置与账号是否已就绪；需要转播底座独立凭据时，再使用扫码登录。
         </Text>
       </SettingsCard>
 
