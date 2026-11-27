@@ -105,7 +105,7 @@ export default function NiconicoSession({ data, onSaved, onReload }: NiconicoSes
       <SaveErrorBanner error={state.error} onReload={onReload} />
       <SettingsCard
         title="Niconico 会话"
-        description="user_session Cookie 的值，加密保存；状态来自最近一次校验，校验本身不会延长会话有效期。"
+        description="user_session 登录信息的值，加密保存；状态来自最近一次校验，校验本身不会延长会话有效期。"
         extra={
           status ? (
             <Tag size="small" color={STATE_COLOR[status.state]}>
@@ -152,9 +152,9 @@ export default function NiconicoSession({ data, onSaved, onReload }: NiconicoSes
           placeholder={
             data.niconico.user_session_configured
               ? '已保存，留空表示不修改'
-              : '只填 Cookie 的值，不要带 user_session= 前缀'
+              : '只填登录信息的值，不要带 user_session= 前缀'
           }
-          help="只接受 Cookie 值本身，不能包含空格、换行或其它 Cookie。"
+          help="只接受登录信息的值本身，不能包含空格、换行或其它内容。"
         />
 
         <SaveRow

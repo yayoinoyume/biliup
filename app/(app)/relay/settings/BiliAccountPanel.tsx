@@ -125,7 +125,7 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
         if (cancelled) return
         setPollText(result.message)
         if (result.status === 'success') {
-          Toast.success('B 站账号已登录，加密凭据已更新')
+          Toast.success('B 站账号已登录，登录信息已更新')
           setQr(null)
           setOpen(false)
           void mutateLogin()
@@ -162,14 +162,14 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
       ) : null}
       <SettingsCard
         title="B 站转播账号"
-        description="默认使用账号中心选中的宿主 B 站账号；扫码登录只是回退到转播底座自己的加密凭据，两套数据互不覆盖。"
+        description="默认使用账号中心选中的 B 站账号；扫码登录会改用转播服务自带的 B 站登录信息（备用），两边分别保存，互不影响。"
         extra={
           <Tag
             size="small"
             color={savedAccountId !== null || login.data?.logged_in ? 'green' : 'grey'}
           >
             {savedAccountId !== null
-              ? '已配置宿主账号'
+              ? '已选择 B 站账号'
               : login.data?.logged_in
                 ? '已登录'
                 : '未登录'}
@@ -179,7 +179,7 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
         {setup.error ? (
           <RelayError
             error={setup.error}
-            title="安装检查失败"
+            title="配置检查失败"
             onRetry={() => {
               void setup.mutate()
             }}
@@ -212,17 +212,17 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
                 type="warning"
                 closeIcon={null}
                 title="当前选中的账号已不可用"
-                description="转播会回退到转播底座自己的 cookies.json。请重新选择账号，或清空后保存来固定回退。"
+                description="转播会改用转播服务自带的 B 站登录信息。请重新选择账号，或清空后保存来固定使用备用登录信息。"
               />
             ) : null}
             <SettingsField
               label="转播账号"
-              hint="不选 = 使用转播底座自己的 cookies.json；选了 = 使用账号中心对应账号的凭据。"
+              hint="不选 = 使用转播服务自带的 B 站登录信息；选了 = 使用账号中心里对应账号的登录信息。"
             >
               <Select
                 value={accountId ?? undefined}
                 optionList={accountOptions}
-                placeholder="不使用账号中心（用转播底座自己的 cookies.json）"
+                placeholder="不使用账号中心（用转播服务自带的登录信息）"
                 style={{ width: '100%' }}
                 showClear
                 loading={usersLoading}
@@ -257,7 +257,7 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
                 管理账号
               </Button>
               <Text type="tertiary" size="small">
-                保存后，之后开播会使用所选账号的凭据。
+                保存后，之后开播会使用所选账号的登录信息。
               </Text>
             </div>
             <SaveRow
@@ -279,18 +279,18 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
           <dt className={relayStyles.kvKey}>登录状态</dt>
           <dd className={relayStyles.kvValue}>
             {savedAccountId !== null
-              ? '宿主账号「' + savedAccountLabel + '」'
+              ? 'B 站账号「' + savedAccountLabel + '」'
               : login.data?.message ?? '—'}
           </dd>
           <dt className={relayStyles.kvKey}>直播间号</dt>
           <dd className={relayStyles.kvValue}>
             {room.data === null ? '暂时取不到，可在向导里手填' : room.data ?? '—'}
           </dd>
-          <dt className={relayStyles.kvKey}>安装检查</dt>
+          <dt className={relayStyles.kvKey}>配置检查</dt>
           <dd className={relayStyles.kvValue}>
             {setup.data
               ? setup.data.needs_setup
-                ? '缺少 ' + setup.data.missing_files.join('、')
+                ? '还需要完成首次设置'
                 : '配置与账号已就绪'
               : '—'}
           </dd>
@@ -308,7 +308,7 @@ export default function BiliAccountPanel({ data, onSaved, onReload }: BiliAccoun
         </div>
 
         <Text type="tertiary" size="small">
-          首次使用状态取决于配置与账号是否已就绪；需要转播底座独立凭据时，再使用扫码登录。
+          首次使用状态取决于配置与账号是否已就绪；需要转播服务自带的登录信息时，再使用扫码登录。
         </Text>
       </SettingsCard>
 

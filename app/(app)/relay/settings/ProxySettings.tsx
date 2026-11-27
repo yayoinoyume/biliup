@@ -194,7 +194,7 @@ export default function ProxySettings({ data, onSaved, onReload }: ProxySettings
           <SettingsField label="Twitch 代理地区" hint="Twitch 的 proxy_region，例如 as、eu。">
             <Input value={twitchRegion} onChange={setTwitchRegion} placeholder="as" />
           </SettingsField>
-          <SettingsField label="YouTube Cookie 来源浏览器" hint="交给 yt-dlp 的 --cookies-from-browser，例如 chrome。">
+          <SettingsField label="YouTube 登录信息来源浏览器" hint="交给 yt-dlp 的 --cookies-from-browser，例如 chrome。">
             <Input value={cookiesBrowser} onChange={setCookiesBrowser} placeholder="chrome" />
           </SettingsField>
           <SettingsField label="Deno 路径" hint="yt-dlp 需要 Deno 时填绝对路径；留空用系统 PATH。">

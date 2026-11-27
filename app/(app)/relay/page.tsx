@@ -33,6 +33,13 @@ const CONNECTION_LABELS: Record<
   offline: { label: '实时已断开', color: 'red' },
 }
 
+const setupMissingText = (files: string[]): string => {
+  const missing: string[] = []
+  if (files.includes('config.json')) missing.push('还差基础参数（房间号、检查间隔）')
+  if (files.includes('cookies.json')) missing.push('还差 B 站登录信息')
+  return missing.length > 0 ? missing.join('；') + '。' : '还差必要的配置。'
+}
+
 export default function RelayOverviewPage() {
   const { can } = useMe()
   const { mutate } = useSWRConfig()
@@ -111,20 +118,13 @@ export default function RelayOverviewPage() {
               className={styles.banner}
               type="warning"
               closeIcon={null}
-              title="首次配置还没有完成"
+              title="首次设置还没有完成"
               description={
                 <div className={styles.errorBody}>
-                  <Text>
-                    {'缺少：' +
-                      (setup.data.missing_files.join('、') || '配置文件') +
-                      '。' +
-                      (setup.data.missing_files.includes('cookies.json')
-                        ? '完成扫码登录与基础参数后即可开播。'
-                        : '完成基础参数后即可开播。')}
-                  </Text>
+                  <Text>{setupMissingText(setup.data.missing_files)}</Text>
                   <div className={styles.errorActions}>
                     <Link href="/relay/setup" className={pageStyles.textLink}>
-                      打开首次配置向导
+                      打开首次设置向导
                     </Link>
                   </div>
                 </div>
@@ -135,8 +135,8 @@ export default function RelayOverviewPage() {
               className={styles.banner}
               type="info"
               closeIcon={null}
-              title="转播底座尚未初始化"
-              description="请联系管理员完成首次配置；首次配置需要「修改转播配置」权限。"
+              title="转播服务还没有初始化"
+              description="请联系管理员完成首次设置；首次设置需要「修改转播配置」权限。"
             />
           )
         ) : null}
@@ -146,7 +146,7 @@ export default function RelayOverviewPage() {
         {setup.error ? (
           <RelayError
             error={setup.error}
-            title="引导状态读取失败"
+            title="首次设置状态读取失败"
             onRetry={() => {
               void setup.mutate()
             }}

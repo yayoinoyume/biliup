@@ -170,7 +170,7 @@ function BiliCard({
           title="直播间封禁中，解封前不会尝试开播"
           description={
             <div className={styles.errorBody}>
-              <Text>封禁原因由 B 站判定，转播底座无法读取具体原因。</Text>
+              <Text>封禁原因由 B 站判定，转播服务无法读取具体原因。</Text>
               <Text>
                 解封时间：{formatUnixSec(bili.lock_till)}
                 {lockRemaining !== null ? '，剩余 ' + formatDurationSec(lockRemaining) : ''}

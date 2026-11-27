@@ -130,7 +130,7 @@ function BiliAccountsPanel() {
         </div>
       ) : biliUsers.length === 0 ? (
         <div className={styles.center}>
-          <Empty title="还没有 B 站账号" description="扫码登录或填写 biliup login 生成的凭据文件路径。">
+          <Empty title="还没有 B 站账号" description="扫码登录，或填写 biliup login 导出的登录信息文件路径。">
             <Button icon={<IconPlusCircle />} theme="solid" onClick={() => setAdding(true)}>
               添加账号
             </Button>
@@ -242,14 +242,14 @@ function YoutubeAccountsPanel() {
             type="warning"
             closeIcon={null}
             title="转播服务尚未配置"
-            description="YouTube 账号保存在转播账号存储里；先完成首次配置向导，再回来管理账号。"
+            description="YouTube 账号保存在转播账号存储里；先完成首次设置，再回来管理账号。"
           />
           <Text type="tertiary" size="small">
             {relayErrorMessage(accounts.error)}
           </Text>
           <div className={styles.toolbarActions}>
             <Button theme="solid" onClick={() => router.push('/relay/setup')}>
-              前往首次配置向导
+              前往首次设置
             </Button>
             <Button onClick={() => void accounts.mutate()}>重试</Button>
           </div>
@@ -314,7 +314,7 @@ function YoutubeAccountsPanel() {
         <div className={styles.center}>
           <Empty
             title="还没有 YouTube 账号"
-            description="添加浏览器 Cookie 或 Netscape 格式的 cookies.txt，转播就能用它访问 YouTube。"
+            description="添加浏览器登录信息或 Netscape 格式的 cookies.txt，转播就能用它访问 YouTube。"
           >
             <Button icon={<IconPlusCircle />} theme="solid" onClick={() => setAddOpen(true)}>
               添加账号
@@ -337,7 +337,7 @@ function YoutubeAccountsPanel() {
                   </div>
                   <div className={styles.accountMeta}>
                     <span>{sourceLabel(account)}</span>
-                    <span>Cookie {account.cookie_count} 条</span>
+                    <span>登录信息 {account.cookie_count} 条</span>
                     <span>更新于 {formatUnixSec(account.updated_at)}</span>
                   </div>
                 </div>
@@ -353,7 +353,7 @@ function YoutubeAccountsPanel() {
                   </Button>
                   <Popconfirm
                     title={'删除 ' + account.label + '？'}
-                    content="删除后这份 Cookie 不再可用；如果转播正在使用它，会退回未选中状态。"
+                    content="删除后这份登录信息不再可用；如果转播正在使用它，会退回未选中状态。"
                     okType="danger"
                     onConfirm={() => remove(account)}
                   >
@@ -461,7 +461,7 @@ function AddYoutubeAccountDialog({
               style={{ width: '100%' }}
               optionList={BROWSERS}
               rules={[{ required: true, message: '选择浏览器' }]}
-              extraText="只在本机读取浏览器 Cookie，浏览器需与转播服务在同一台机器。"
+              extraText="只在本机读取浏览器登录信息，浏览器需与转播服务在同一台机器。"
             />
             <Form.Input
               field="profile"

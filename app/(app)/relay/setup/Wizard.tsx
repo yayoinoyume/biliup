@@ -347,7 +347,7 @@ export default function Wizard() {
       return
     }
     if (form.intervalSeconds <= 0) {
-      Toast.error('检测间隔必须大于 0')
+      Toast.error('检查间隔必须大于 0')
       setStep(1)
       return
     }
@@ -361,8 +361,8 @@ export default function Wizard() {
     setSavedMessage(null)
     try {
       const message = await relaySaveSetupConfig(buildPayload())
-      setSavedMessage(message ?? '首次配置已保存')
-      Toast.success(message ?? '首次配置已保存')
+      setSavedMessage(message ?? '首次设置已保存')
+      Toast.success(message ?? '首次设置已保存')
       void setup.mutate()
     } catch (error) {
       Toast.error(relayErrorMessage(error))
@@ -377,7 +377,7 @@ export default function Wizard() {
       return
     }
     if (step === 1 && form.intervalSeconds <= 0) {
-      Toast.error('检测间隔必须大于 0')
+      Toast.error('检查间隔必须大于 0')
       return
     }
     setStep(Math.min(step + 1, 2))
@@ -395,19 +395,22 @@ export default function Wizard() {
       <section className={styles.card}>
         <Steps current={step} type="basic" size="small">
           <Steps.Step title="B 站账号" description="账号与房间号" />
-          <Steps.Step title="基础参数" description="检测间隔与密钥" />
+          <Steps.Step title="基础参数" description="检查间隔与密钥" />
           <Steps.Step title="频道与分区" description="监控目标与初始名单" />
         </Steps>
         <div style={{ marginTop: 12 }}>
           <Text type="tertiary" size="small">
-            需要引导：{setup.isLoading ? '检查中…' : setup.data?.needs_setup ? '是' : '否'}
-            {setup.data?.missing_files?.length ? '（缺少 ' + setup.data.missing_files.join('、') + '）' : ''}
+            {setup.isLoading
+              ? '正在检查首次设置…'
+              : setup.data?.needs_setup
+                ? '还需要完成首次设置'
+                : '首次设置已完成'}
           </Text>
         </div>
         {setup.error ? (
           <RelayError
             error={setup.error}
-            title="安装检查读取失败"
+            title="配置检查读取失败"
             onRetry={() => {
               void setup.mutate()
             }}
@@ -427,8 +430,8 @@ export default function Wizard() {
             className={styles.banner}
             type="warning"
             closeIcon={null}
-            title="首次配置已经完成"
-            description="继续保存会覆盖房间号、检测间隔与平台监控开关。只调整日常参数时请去转播设置页。"
+            title="首次设置已经完成"
+            description="继续保存会覆盖房间号、检查间隔与平台监控开关。只调整日常参数时请前往转播设置页。"
           />
         ) : null}
       </section>
@@ -453,7 +456,7 @@ export default function Wizard() {
                 }
               >
                 {hostAccount
-                  ? '宿主账号已配置'
+                  ? '已选择 B 站账号'
                   : login.error
                     ? '登录状态未知'
                     : loginCheckedIn
@@ -466,11 +469,11 @@ export default function Wizard() {
                 className={styles.banner}
                 type="success"
                 closeIcon={null}
-                title="宿主账号已配置"
+                title={`将使用 B 站账号：${hostAccountLabel}`}
                 description={
                   hostAccounts.length > 1
-                    ? `转播将使用宿主账号「${hostAccountLabel}」（共 ${hostAccounts.length} 个，默认用第一个），不需要扫码。房间号请手动填写，保存后可在转播设置里更换账号。`
-                    : `转播将使用宿主账号「${hostAccountLabel}」，不需要扫码。房间号请手动填写，保存后可在转播设置里修改。`
+                    ? `保存后转播会使用这个 B 站账号；房间号请手动填写。保存后可在转播设置里更换（账号中心共 ${hostAccounts.length} 个，默认用第一个）。`
+                    : '保存后转播会使用这个 B 站账号；房间号请手动填写。保存后可在转播设置里更换。'
                 }
               />
             ) : login.error ? (
@@ -486,30 +489,26 @@ export default function Wizard() {
                 className={styles.banner}
                 type={loginCheckedIn ? 'success' : 'info'}
                 closeIcon={null}
-                title={loginCheckedIn ? 'B 站账号已登录' : '用 B 站客户端扫码登录'}
+                title={loginCheckedIn ? 'B 站账号已登录' : '用 B 站扫码登录'}
                 description={
                   loginCheckedIn
-                    ? '登录态已保存到加密库，下面的房间号可以从账号自动读取。'
-                    : '扫码登录后会自动保存登录态，便于后续开播与弹幕指令。也可以先手填房间号继续，稍后在设置页补登录。'
+                    ? '登录信息已保存到加密库，下面的房间号可以从账号自动读取。'
+                    : '扫码登录后会自动保存登录信息，便于后续开播与弹幕指令。也可以先手填房间号继续，稍后在设置页补登录。'
                 }
               />
             )}
             <div className={styles.toolbar}>
-              <Button
-                theme="solid"
-                type="primary"
-                loading={loadingQr}
-                disabled={polling}
-                onClick={() => void requestQrCode()}
-              >
-                {polling
-                  ? '等待扫码…'
-                  : hostAccount
-                    ? '改用转播底座扫码（可选）'
-                    : qr
-                      ? '重新获取二维码'
-                      : '获取登录二维码'}
-              </Button>
+              {hostAccount ? null : (
+                <Button
+                  theme="solid"
+                  type="primary"
+                  loading={loadingQr}
+                  disabled={polling}
+                  onClick={() => void requestQrCode()}
+                >
+                  {polling ? '等待扫码…' : qr ? '重新获取二维码' : '用 B 站扫码登录'}
+                </Button>
+              )}
               <Button
                 loading={readingRoom}
                 disabled={!loginCheckedIn}
@@ -518,7 +517,7 @@ export default function Wizard() {
                 从账号读取房间号
               </Button>
               <Link href="/relay/settings" className={pageStyles.textLink}>
-                从加密备份恢复 / 去设置页
+                恢复备份 / 打开转播设置
               </Link>
             </div>
             {qr ? (
@@ -539,7 +538,7 @@ export default function Wizard() {
               label="直播间号"
               hint={
                 hostAccount && !loginCheckedIn
-                  ? '保存后会使用宿主账号；房间号请手动填写。'
+                  ? '保存后会使用所选的 B 站账号；房间号请手动填写。'
                   : '登录后可以从账号自动读取；也可以直接填写。'
               }
             >
@@ -566,11 +565,11 @@ export default function Wizard() {
               className={styles.banner}
               type="info"
               closeIcon={null}
-              title="后台登录与权限统一由 biliup 宿主账号管理"
-              description="这里只配置转播底座自身的参数，不再单独设置上游面板密码。用户登录、角色与权限请在宿主账号体系里管理。"
+              title="后台登录与权限统一由 B 站账号管理"
+              description="这里只配置转播服务自身的参数，不再单独设置上游面板密码。用户登录、角色与权限请在账号中心里管理。"
             />
             <div className={pageStyles.formGrid}>
-              <Field label="检测间隔（秒）" hint="直播状态轮询的最短间隔，默认 60 秒。">
+              <Field label="检查间隔（秒）" hint="直播状态轮询的最短间隔，默认 60 秒。">
                 <InputNumber
                   value={form.intervalSeconds > 0 ? form.intervalSeconds : undefined}
                   min={5}
@@ -635,7 +634,7 @@ export default function Wizard() {
               </Field>
             </div>
             <Text type="tertiary" size="small">
-              YouTube API Key 不在首次向导的保存接口里，
+              YouTube API Key 不能在首次设置里保存，
               <Link href="/relay/settings" className={pageStyles.textLink}>
                 请到转播设置页配置
               </Link>
@@ -787,7 +786,7 @@ export default function Wizard() {
                   额外分区名单
                 </Title>
                 <Text type="tertiary" size="small">
-                  保存时会合并进本机 areas.json
+                  保存时会合并进本机的分区名单
                 </Text>
               </div>
               <div className={pageStyles.formGrid}>
@@ -852,7 +851,7 @@ export default function Wizard() {
                 className={styles.banner}
                 type="success"
                 closeIcon={null}
-                title="首次配置已保存"
+                title="首次设置已保存"
                 description={
                   <div className={styles.errorBody}>
                     <Text>{savedMessage}</Text>
@@ -881,7 +880,7 @@ export default function Wizard() {
               </Button>
             ) : (
               <Button theme="solid" type="primary" loading={saving} onClick={() => void save()}>
-                保存首次配置
+                保存首次设置
               </Button>
             )}
           </div>

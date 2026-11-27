@@ -37,18 +37,18 @@ function ConfigUnavailable({ error, onRetry }: { error: unknown; onRetry: () => 
     <section className={relayStyles.card}>
       <div className={relayStyles.sectionTitle}>
         <Title heading={6} style={{ margin: 0 }}>
-          尚未完成初始化
+          还没有完成首次设置
         </Title>
       </div>
       <div className={relayStyles.stack}>
         <Text>
-          配置尚不存在或读取失败。请先前往首次配置向导完成初始化，或在「存储与备份」里恢复加密备份。
+          配置尚不存在或读取失败。请先前往首次设置完成初始化，或在「存储与备份」里恢复备份。
         </Text>
         {error ? <RelayError error={error} title="配置读取失败" onRetry={onRetry} /> : null}
         <div className={styles.actions}>
           <Button onClick={onRetry}>重试读取配置</Button>
           <Button theme="light" onClick={() => router.push('/relay/setup')}>
-            前往首次配置向导
+            前往首次设置
           </Button>
         </div>
       </div>
@@ -116,7 +116,7 @@ function SettingsContent() {
           )}
         </div>
       </TabPane>
-      <TabPane tab="密钥池与 Cookie" itemKey="keys">
+      <TabPane tab="密钥池与登录信息" itemKey="keys">
         <div className={styles.pane}>
           {data ? (
             <ApiKeysPanel

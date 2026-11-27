@@ -168,7 +168,7 @@ export default function RelayLogsPage() {
     <div className={relay.content}>
       <PageHeader
         title="实时日志"
-        description="转播底座的内存环形日志"
+        description="转播服务的内存环形日志"
         icon={<IconTerminal />}
         breadcrumbs={[{ href: '/relay', label: '直播转播' }]}
         actions={

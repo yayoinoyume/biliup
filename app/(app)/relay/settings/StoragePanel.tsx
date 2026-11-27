@@ -113,7 +113,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
     <>
       <SettingsCard
         title="加密存储"
-        description="转播底座的配置、Cookie 与监控数据都存进加密 SQLite；备份是整库导出，恢复会覆盖当前整库。"
+        description="转播服务的配置、登录信息与监控数据都存进加密数据库；备份会导出全部数据，恢复会覆盖当前全部数据。"
       >
         {storage.error ? (
           <RelayError
@@ -171,14 +171,14 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
             下载加密备份
           </Button>
           <Text type="tertiary" size="small">
-            导出内容包含全部文档与凭据，请按敏感文件保管。
+            导出内容包含全部文档与登录信息，请按敏感文件保管。
           </Text>
         </div>
       </SettingsCard>
 
       <SettingsCard
         title="恢复备份"
-        description="上传不超过 32MiB 的 biliup.backup，输对口令后会整库覆盖；恢复无法撤销。"
+        description="上传不超过 32MiB 的 biliup.backup，输对口令后会覆盖全部数据；恢复无法撤销。"
       >
         {ready && configured ? (
           <Banner
@@ -250,7 +250,7 @@ export default function StoragePanel({ onRestored }: StoragePanelProps) {
           onCancel={() => setConfirmOpen(false)}
         >
           <Text>
-            将用 {file.name}（{formatBytes(file.size)}）覆盖当前整库内容，包括配置、Cookie 与统计文档。恢复过程不可撤销，确定继续吗？
+            将用 {file.name}（{formatBytes(file.size)}）覆盖当前全部数据，包括配置、登录信息与统计文档。恢复过程不可撤销，确定继续吗？
           </Text>
         </FormDialog>
       ) : null}
