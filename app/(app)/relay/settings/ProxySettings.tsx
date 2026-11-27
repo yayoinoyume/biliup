@@ -157,7 +157,7 @@ export default function ProxySettings({ data, onSaved, onReload }: ProxySettings
       <SaveErrorBanner error={state.error} onReload={onReload} />
       <SettingsCard
         title="代理与网络"
-        description="三个平台的出站代理、WebSub 回调与 yt-dlp 相关设置。已保存的代理密码只以掩码显示；把密码位清空后保存会沿用旧密码。"
+        description="三个平台的出站代理、WebSub 回调与 yt-dlp 相关设置。已保存的代理密码只以星号显示；把密码位清空后保存会沿用旧密码。"
       >
         <div className={styles.formGrid}>
           <SettingsField
@@ -165,7 +165,7 @@ export default function ProxySettings({ data, onSaved, onReload }: ProxySettings
             hint={
               data.youtube.proxy_configured
                 ? '留空并保存表示清除代理；改地址时请把密码位清空以保留旧密码。'
-                : 'http:// 或 socks5:// 地址；保存后密码只显示掩码。'
+                : 'http:// 或 socks5:// 地址；保存后密码只显示星号。'
             }
           >
             <Input

@@ -285,14 +285,14 @@ export default function RelayAnalyticsPage() {
           <RelayError error={history.summaryError} onRetry={refresh} title="汇总加载失败" />
         ) : null}
         {history.statusError ? (
-          <RelayError error={history.statusError} onRetry={reloadHistory} title="统计库状态加载失败" />
+          <RelayError error={history.statusError} onRetry={reloadHistory} title="统计数据加载失败" />
         ) : null}
         {busy ? (
           <Banner
             className={relay.banner}
             type="warning"
             title="统计查询繁忙"
-            description="转播服务每个节点只允许同时跑两个统计查询，稍等片刻再刷新。"
+            description="转播服务每台转播机器只允许同时跑两个统计查询，稍等片刻再刷新。"
             closeIcon={null}
           />
         ) : null}
@@ -303,14 +303,14 @@ export default function RelayAnalyticsPage() {
             title="统计结果过大"
             description={
               <div className={styles.bannerBody}>
-                <Text>转播服务合并后的结果超过 1MiB。降低采样点或缩小时间范围再看。</Text>
+                <Text>转播服务合并后的结果超过 1MiB。减少数据点或缩小时间范围再看。</Text>
                 <Button
                   size="small"
                   theme="light"
                   disabled={maxPoints <= 60}
                   onClick={() => setMaxPoints((value) => Math.max(60, Math.floor(value / 2)))}
                 >
-                  {maxPoints <= 60 ? '已达最小采样点，请缩小时间范围' : '采样点减半重试'}
+                  {maxPoints <= 60 ? '已达最少数据点，请缩小时间范围' : '数据点减半重试'}
                 </Button>
               </div>
             }
@@ -389,7 +389,7 @@ export default function RelayAnalyticsPage() {
               </section>
               <section className={relay.card}>
                 <div className={relay.sectionTitle}>
-                  <Text strong>节点覆盖</Text>
+                  <Text strong>转播机器覆盖</Text>
                 </div>
                 <Nodes summary={summary} />
               </section>
@@ -416,7 +416,7 @@ export default function RelayAnalyticsPage() {
             </div>
             <div className={styles.dangerRow}>
               <Text type="tertiary" size="small">
-                清空本节点已记录的场次、事件与曲线行；集群里别的节点保留自己的行。
+                清空本台转播机器已记录的场次、事件与曲线数据；其他转播机器保留自己的数据。
               </Text>
               <Button type="danger" theme="light" onClick={() => setCleanOpen(true)}>
                 清理历史统计
@@ -437,13 +437,13 @@ export default function RelayAnalyticsPage() {
         >
           <div className={relay.stack}>
             <Text>
-              这会删掉本节点统计库里「全部」已记录的行，删完无法恢复；正在转播的节点会被转播服务拒绝。
+              这会删掉本台转播机器上「全部」已记录的统计数据，删完无法恢复；正在推流的转播机器会被转播服务拒绝。
             </Text>
             <Text type="tertiary" size="small">
               当前保留期：原始采样 {status?.retention.raw_days ?? '—'} 天，汇总{' '}
               {status?.retention.rollup_days ?? '—'} 天，事件 {status?.retention.event_days ?? '—'} 天。
               转播服务不支持在清理时指定保留天数；只想保留最近 N 天的话，请到设置页把保留天数调低，
-              写入线程会按天自动淘汰。
+              统计数据只保留最近几天，过期会自动清理。
             </Text>
             {cleanError ? <RelayError error={cleanError} title="清理失败" /> : null}
           </div>

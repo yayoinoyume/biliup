@@ -566,7 +566,7 @@ export default function Wizard() {
               type="info"
               closeIcon={null}
               title="后台登录与权限统一由 B 站账号管理"
-              description="这里只配置转播服务自身的参数，不再单独设置上游面板密码。用户登录、角色与权限请在账号中心里管理。"
+              description="这里只设置转播服务自己的参数，不再单独维护另一套登录密码。网页登录、角色和权限请到「登录用户与权限」管理。"
             />
             <div className={pageStyles.formGrid}>
               <Field label="检查间隔（秒）" hint="多久检查一次直播状态，默认 60 秒。">

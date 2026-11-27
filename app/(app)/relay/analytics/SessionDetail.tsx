@@ -81,7 +81,7 @@ function SessionBody({ session }: SessionBodyProps) {
       <dl className={relay.kv}>
         <dt className={relay.kvKey}>场次 id</dt>
         <dd className={`${relay.kvValue} ${relay.mono}`}>{session.id}</dd>
-        <dt className={relay.kvKey}>节点</dt>
+        <dt className={relay.kvKey}>转播机器</dt>
         <dd className={relay.kvValue}>{session.node}</dd>
         <dt className={relay.kvKey}>频道</dt>
         <dd className={relay.kvValue}>

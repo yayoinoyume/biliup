@@ -92,7 +92,7 @@ export function ProviderCredentials({ data, onSaved, onReload }: ProviderCredent
       <SaveErrorBanner error={keys.error} onReload={onReload} />
       <SettingsCard
         title="Holodex 与 Riot 密钥"
-        description="密钥保存在加密存储里；保存后只显示掩码，不会再显示原文。保存时会检查是否刚被别人改过。"
+        description="密钥保存在加密存储里；保存后只显示星号，不会再显示原文。保存时会检查是否刚被别人改过。"
       >
         <MaskedSecretInput
           id="relay-holodex-api-key"

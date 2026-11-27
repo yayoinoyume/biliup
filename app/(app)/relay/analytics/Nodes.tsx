@@ -27,11 +27,11 @@ export default function Nodes({ summary }: NodesProps) {
         <table className={styles.table}>
           <thead>
             <tr>
-              <th scope="col">节点</th>
+              <th scope="col">转播机器</th>
               <th scope="col">推流时长</th>
               <th scope="col">失败</th>
               <th scope="col">停机</th>
-              <th scope="col">节点观测</th>
+              <th scope="col">转播机器观测</th>
               <th scope="col">历史起点</th>
               <th scope="col">最后上报</th>
             </tr>
@@ -51,7 +51,7 @@ export default function Nodes({ summary }: NodesProps) {
             {nodes.length === 0 ? (
               <tr>
                 <td colSpan={7}>
-                  <span className={relay.muted}>没有节点记录。</span>
+                  <span className={relay.muted}>没有转播机器记录。</span>
                 </td>
               </tr>
             ) : null}
@@ -65,7 +65,7 @@ export default function Nodes({ summary }: NodesProps) {
         <dt className={relay.kvKey}>更早的保留边界</dt>
         <dd className={relay.kvValue}>
           {Object.keys(summary.coverage.partial_before).length === 0
-            ? '无（全部节点覆盖整段区间）'
+            ? '无（全部转播机器都覆盖整段区间）'
             : Object.entries(summary.coverage.partial_before)
                 .map(([node, at]) => `${node}：${formatUnixSec(at)}`)
                 .join('；')}
@@ -78,14 +78,14 @@ export default function Nodes({ summary }: NodesProps) {
 
       {partial.length > 0 ? (
         <p className={relay.muted}>
-          被节点自身的保留期截断：
+          被转播机器自身的保留期截断：
           {partial.map((item) => `${item.node} 只保留 ${item.clamped_to_days} 天`).join('；')}
         </p>
       ) : null}
       {summary.clamped_to_days !== undefined ? (
         <p className={relay.muted}>
           查询区间被保留期截断到最近 {summary.clamped_to_days} 天
-          {summary.clamp_scope === 'local' ? '（仅本节点）' : ''}。
+          {summary.clamp_scope === 'local' ? '（仅本台）' : ''}。
         </p>
       ) : null}
       {missing.length > 0 ? (
