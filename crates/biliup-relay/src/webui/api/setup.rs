@@ -33,7 +33,7 @@ fn setup_missing_files(
     if !has_config {
         missing_files.push("config.json".into());
     }
-    if account_id.is_none() && !has_host_account && !has_standalone_cookies {
+    if account_id.is_none() && !has_standalone_cookies && (has_config || !has_host_account) {
         missing_files.push("cookies.json".into());
     }
     missing_files
@@ -649,12 +649,15 @@ mod setup_tests {
     }
 
     #[test]
-    fn missing_cookies_only_without_account_and_host_accounts() {
+    fn missing_cookies_tracks_config_account_and_host_accounts() {
         assert_eq!(
             setup_missing_files(false, None, true, false),
             vec!["config.json".to_string()]
         );
-        assert!(setup_missing_files(true, None, true, false).is_empty());
+        assert_eq!(
+            setup_missing_files(true, None, true, false),
+            vec!["cookies.json".to_string()]
+        );
         assert_eq!(
             setup_missing_files(false, None, false, false),
             vec!["config.json".to_string(), "cookies.json".to_string()]
@@ -835,7 +838,7 @@ mod setup_tests {
     }
 
     #[tokio::test]
-    async fn check_setup_accepts_a_host_account_without_relay_cookies() {
+    async fn check_setup_asks_for_config_then_cookies_until_an_account_is_saved() {
         let _guard = crate::storage::lock_test_global();
         let _reset = StoreReset;
         let _accounts = crate::credential_bridge::test_lock();
@@ -849,7 +852,24 @@ mod setup_tests {
         let status = check_setup().await.unwrap().0;
         assert_eq!(status.missing_files, vec!["config.json".to_string()]);
         assert!(status.needs_setup);
-        assert!(!status.missing_files.iter().any(|name| name == "cookies.json"));
+
+        crate::storage::write_document(
+            "config.json",
+            &serde_json::json!({"bililive": {"account_id": null}}),
+        )
+        .unwrap();
+        let status = check_setup().await.unwrap().0;
+        assert_eq!(status.missing_files, vec!["cookies.json".to_string()]);
+        assert!(status.needs_setup);
+
+        crate::storage::write_document(
+            "config.json",
+            &serde_json::json!({"bililive": {"account_id": 3}}),
+        )
+        .unwrap();
+        let status = check_setup().await.unwrap().0;
+        assert!(status.missing_files.is_empty());
+        assert!(!status.needs_setup);
 
         crate::credential_bridge::set_account_provider(None);
     }
